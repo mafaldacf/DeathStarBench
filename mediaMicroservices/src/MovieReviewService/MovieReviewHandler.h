@@ -61,6 +61,8 @@ void MovieReviewHandler::UploadMovieReview(
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
+  LOG(info) << "request to upload movie review (movie_id=" << movie_id << ", review_id=" << review_id << ")";
+
   mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
       _mongodb_client_pool);
   if (!mongodb_client) {
@@ -177,6 +179,9 @@ void MovieReviewHandler::UploadMovieReview(
     redis_client->zadd(movie_id, options, value);
     redis_client->sync_commit();
   }
+
+  LOG(info) << "OK! (movie_id=" << movie_id << ", review_id=" << review_id << ")";
+
   _redis_client_pool->Push(redis_client_wrapper);
   redis_span->Finish();
   span->Finish();
@@ -196,6 +201,8 @@ void MovieReviewHandler::ReadMovieReviews(
       "ReadMovieReviews",
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
+
+  LOG(info) << "received request to read movie reviews (movie_id=" << movie_id << ", start=" << start << ", stop=" << stop << ")";
 
   if (stop <= start || start < 0) {
     return;
@@ -226,7 +233,9 @@ void MovieReviewHandler::ReadMovieReviews(
   _redis_client_pool->Push(redis_client_wrapper);
   std::vector<int64_t> review_ids;
   auto review_ids_reply_array = review_ids_reply.as_array();
+  LOG(info) << "number of review IDs from Redis: " << review_ids_reply_array.size();
   for (auto &review_id_reply : review_ids_reply_array) {
+    LOG(info) << "Got review id from Redis: " << review_id_reply.as_string();
     review_ids.emplace_back(std::stoul(review_id_reply.as_string()));
   }
 
@@ -265,6 +274,7 @@ void MovieReviewHandler::ReadMovieReviews(
     find_span->Finish();
     const bson_t *doc;
     bool found = mongoc_cursor_next(cursor, &doc);
+    LOG(info) << "query to MongoDB with found = " << found;
     if (found) {
       bson_iter_t iter_0;
       bson_iter_t iter_1;
@@ -285,8 +295,11 @@ void MovieReviewHandler::ReadMovieReviews(
           && BSON_ITER_HOLDS_INT64(&timestamp_child)) {
         auto curr_review_id = bson_iter_int64(&review_id_child);
         auto curr_timestamp = bson_iter_int64(&timestamp_child);
+        LOG(info) << "got review id from MongoDB: " << curr_review_id;
         if (idx >= mongo_start) {
+          LOG(info) << "adding review id from MongoDB: " << curr_review_id;
           review_ids.emplace_back(curr_review_id);
+
         }
         redis_update_map.insert(
             {std::to_string(curr_timestamp), std::to_string(curr_review_id)});
@@ -372,6 +385,8 @@ void MovieReviewHandler::ReadMovieReviews(
     }
     _redis_client_pool->Push(redis_client_wrapper);
   }
+
+  LOG(info) << "OK (movie_id=" << movie_id << ", start=" << start << ", stop=" << stop << ")";
 
   span->Finish();
   

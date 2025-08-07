@@ -82,6 +82,8 @@ void ComposeReviewHandler::_ComposeAndUpload(
   std::string key_text = std::to_string(req_id) + ":text";
   std::string key_rating = std::to_string(req_id) + ":rating";
 
+  LOG(info) << "request to compose and upload (user_id=" << key_user_id << ", movie_id=" << key_movie_id << ")";
+
   const char* keys[NUM_COMPONENTS] = {
       key_unique_id.c_str(),
       key_movie_id.c_str(),
@@ -249,6 +251,9 @@ void ComposeReviewHandler::_ComposeAndUpload(
   } catch (...) {
     throw;
   }
+
+  LOG(info) << "OK! compose and upload (user_id=" << key_user_id << ", movie_id=" << key_movie_id << ")";
+
 }
 
 void ComposeReviewHandler::UploadMovieId(

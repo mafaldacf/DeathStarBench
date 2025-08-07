@@ -10,6 +10,11 @@
 #include <libmemcached/util.h>
 #include <bson/bson.h>
 
+#include <aws/core/Aws.h>
+#include <aws/dynamodb/DynamoDBClient.h>
+#include <aws/dynamodb/model/PutItemRequest.h>
+#include <aws/dynamodb/model/GetItemRequest.h>
+
 #include "../../gen-cpp/MovieIdService.h"
 #include "../../gen-cpp/ComposeReviewService.h"
 #include "../../gen-cpp/RatingService.h"
@@ -27,7 +32,10 @@ class MovieIdHandler : public MovieIdServiceIf {
       memcached_pool_st *,
       mongoc_client_pool_t *,
       ClientPool<ThriftClient<ComposeReviewServiceClient>> *,
-      ClientPool<ThriftClient<RatingServiceClient>> *);
+      ClientPool<ThriftClient<RatingServiceClient>> *,
+      Aws::DynamoDB::DynamoDBClient*,
+      std::string,
+      std::string);
   ~MovieIdHandler() override = default;
   void UploadMovieId(int64_t, const std::string &, int32_t,
                      const std::map<std::string, std::string> &) override;
@@ -39,17 +47,26 @@ class MovieIdHandler : public MovieIdServiceIf {
   mongoc_client_pool_t *_mongodb_client_pool;
   ClientPool<ThriftClient<ComposeReviewServiceClient>> *_compose_client_pool;
   ClientPool<ThriftClient<RatingServiceClient>> *_rating_client_pool;
+  Aws::DynamoDB::DynamoDBClient *_dynamo_client;
+  std::string _aws_region;
+  std::string _dynamo_table_name;
 };
 
 MovieIdHandler::MovieIdHandler(
     memcached_pool_st *memcached_client_pool,
     mongoc_client_pool_t *mongodb_client_pool,
     ClientPool<ThriftClient<ComposeReviewServiceClient>> *compose_client_pool,
-    ClientPool<ThriftClient<RatingServiceClient>> *rating_client_pool) {
+    ClientPool<ThriftClient<RatingServiceClient>> *rating_client_pool,
+    Aws::DynamoDB::DynamoDBClient *dynamo_client,
+    std::string aws_region,
+    std::string dynamo_table_name) {
   _memcached_client_pool = memcached_client_pool;
   _mongodb_client_pool = mongodb_client_pool;
   _compose_client_pool = compose_client_pool;
   _rating_client_pool = rating_client_pool;
+  _dynamo_client = dynamo_client;
+  _aws_region = aws_region;
+  _dynamo_table_name = dynamo_table_name;
 }
 
 void MovieIdHandler::UploadMovieId(
@@ -111,73 +128,56 @@ void MovieIdHandler::UploadMovieId(
     free(movie_id_mmc);
   }
 
-    // If not cached in memcached
+  // if not cached in memcached
   else {
-    mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-        _mongodb_client_pool);
-    if (!mongodb_client) {
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to pop a client from MongoDB pool";
-      free(movie_id_mmc);
-      throw se;
-    }
-    auto collection = mongoc_client_get_collection(
-        mongodb_client, "movie-id", "movie-id");
+    auto get_span = opentracing::Tracer::Global()->StartSpan(
+        "DynamoGetMovieId", { opentracing::ChildOf(&span->context()) });
 
-    if (!collection) {
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to create collection user from DB movie-id";
-      free(movie_id_mmc);
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-      throw se;
-    }
+    Aws::DynamoDB::Model::GetItemRequest get_req;
+    get_req.SetTableName(_dynamo_table_name);
 
-    bson_t *query = bson_new();
-    BSON_APPEND_UTF8(query, "title", title.c_str());
+    Aws::Map<Aws::String, Aws::DynamoDB::Model::AttributeValue> key;
+    Aws::DynamoDB::Model::AttributeValue title_key;
+    title_key.SetS(title);
+    key.emplace("title", std::move(title_key));
+    get_req.SetKey(std::move(key));
 
-    auto find_span = opentracing::Tracer::Global()->StartSpan(
-        "MongoFindMovieId", { opentracing::ChildOf(&span->context()) });
-    mongoc_cursor_t *cursor = mongoc_collection_find_with_opts(
-        collection, query, nullptr, nullptr);
-    const bson_t *doc;
-    bool found = mongoc_cursor_next(cursor, &doc);
-    find_span->Finish();
+    auto response = _dynamo_client->GetItem(get_req);
+    get_span->Finish();
 
-    if (found) {
-      bson_iter_t iter;
-      if (bson_iter_init_find(&iter, doc, "movie_id")) {
-        movie_id_str = std::string(bson_iter_value(&iter)->value.v_utf8.str);
-        LOG(debug) << "Find movie " << movie_id_str << " cache miss";
-      } else {
-        LOG(error) << "Attribute movie_id is not find in MongoDB";
-        bson_destroy(query);
-        mongoc_cursor_destroy(cursor);
-        mongoc_collection_destroy(collection);
-        mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-        ServiceException se;
-        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-        se.message = "Attribute movie_id is not find in MongoDB";
-        free(movie_id_mmc);
-        throw se;
-      }
-    } else {
-      LOG(error) << "Movie " << title << " is not found in MongoDB";
-      bson_destroy(query);
-      mongoc_cursor_destroy(cursor);
-      mongoc_collection_destroy(collection);
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+    if (!response.IsSuccess()) {
+      const auto& err = response.GetError();
+      LOG(error) << "failed to get item from dynamo (region=" << _aws_region << ", table= " << _dynamo_table_name << "): " << err.GetMessage();
       ServiceException se;
       se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-      se.message = "Movie " + title + " is not found in MongoDB";
+      se.message = err.GetMessage();
       free(movie_id_mmc);
       throw se;
     }
-    bson_destroy(query);
-    mongoc_cursor_destroy(cursor);
-    mongoc_collection_destroy(collection);
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+
+    const auto& item = response.GetResult().GetItem();
+    if (item.empty()) {
+      // title not found
+      LOG(error) << "movie " << title << " not found in dynamodb";
+      ServiceException se;
+      se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+      se.message = "Movie " + title + " not found in DynamoDB";
+      free(movie_id_mmc);
+      throw se;
+    }
+
+    auto it = item.find("movie_id");
+    if (it == item.end()) {
+      LOG(error) << "attribute movie_id does not exist in item";
+      ServiceException se;
+      se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+      se.message = "Attribute movie_id does not exist in item";
+      free(movie_id_mmc);
+      throw se;
+    }
+
+    movie_id_str = it->second.GetS();
+    LOG(debug) << "found movie " << movie_id_str << " cache miss (dynamodb)";
   }
   
   std::future<void> set_future;
@@ -271,74 +271,38 @@ void MovieIdHandler::RegisterMovieId (
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
-  mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-      _mongodb_client_pool);
-  if (!mongodb_client) {
+  Aws::DynamoDB::Model::PutItemRequest req;
+  req.SetTableName(_dynamo_table_name);
+
+  Aws::DynamoDB::Model::AttributeValue title_attr;
+  title_attr.SetS(title);
+  req.AddItem("title", title_attr);
+
+  Aws::DynamoDB::Model::AttributeValue movie_id_attr;
+  movie_id_attr.SetS(movie_id);
+  req.AddItem("movie_id", movie_id_attr);
+
+  Aws::DynamoDB::Model::AttributeValue region_attr;
+  region_attr.SetS(_aws_region);
+  req.AddItem("region", region_attr);
+
+  req.SetConditionExpression("attribute_not_exists(title)");
+
+  auto response = _dynamo_client->PutItem(req);
+
+  if (!response.IsSuccess()) {
+    const auto& err = response.GetError();
+    LOG(error) << "failed to insert to dynamo (region=" << _aws_region << ", table= " << _dynamo_table_name << "): " << err.GetMessage();
     ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to pop a client from MongoDB pool";
-    throw se;
-  }
-  auto collection = mongoc_client_get_collection(
-      mongodb_client, "movie-id", "movie-id");
-  if (!collection) {
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to create collection movie_id from DB movie-id";
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-    throw se;
-  }
-
-  // Check if the username has existed in the database
-  bson_t *query = bson_new();
-  BSON_APPEND_UTF8(query, "title", title.c_str());
-
-  auto find_span = opentracing::Tracer::Global()->StartSpan(
-      "MongoFindMovie", { opentracing::ChildOf(&span->context()) });
-  mongoc_cursor_t *cursor = mongoc_collection_find_with_opts(
-      collection, query, nullptr, nullptr);
-  const bson_t *doc;
-  bool found = mongoc_cursor_next(cursor, &doc);
-  find_span->Finish();
-
-  if (found) {
-    LOG(warning) << "Movie "<< title << " already existed in MongoDB";
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-    se.message = "Movie " + title + " already existed in MongoDB";
-    mongoc_cursor_destroy(cursor);
-    mongoc_collection_destroy(collection);
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-    throw se;
-  } else {
-    bson_t *new_doc = bson_new();
-    BSON_APPEND_UTF8(new_doc, "title", title.c_str());
-    BSON_APPEND_UTF8(new_doc, "movie_id", movie_id.c_str());
-    bson_error_t error;
-
-    auto insert_span = opentracing::Tracer::Global()->StartSpan(
-        "MongoInsertMovie", { opentracing::ChildOf(&span->context()) });
-    bool plotinsert = mongoc_collection_insert_one (
-        collection, new_doc, nullptr, nullptr, &error);
-    insert_span->Finish();
-
-    if (!plotinsert) {
-      LOG(error) << "Failed to insert movie_id of " << title
-          << " to MongoDB: " << error.message;
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = error.message;
-      bson_destroy(new_doc);
-      mongoc_cursor_destroy(cursor);
-      mongoc_collection_destroy(collection);
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-      throw se;
+    if (err.GetErrorType() == Aws::DynamoDB::DynamoDBErrors::CONDITIONAL_CHECK_FAILED) {
+      se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+      se.message = "Movie " + title + " already existed in DynamoDB";
+    } else {
+      se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+      se.message = err.GetMessage();
     }
-    bson_destroy(new_doc);
+    throw se;
   }
-  mongoc_cursor_destroy(cursor);
-  mongoc_collection_destroy(collection);
-  mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
 
   span->Finish();
 }

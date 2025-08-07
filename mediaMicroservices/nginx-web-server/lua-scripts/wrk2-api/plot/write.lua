@@ -36,8 +36,33 @@ function _M.WritePlot()
     ngx.exit(ngx.HTTP_BAD_REQUEST)
   end
 
+  --local client = GenericObjectPool:connection(PlotServiceClient, "plot-service" .. k8s_suffix, 9090)
+  --client:WritePlot(req_id, plot["plot_id"], plot["plot"], carrier)
+  --ngx.say("successfully wrote cast info (plot_id=" .. plot["plot_id"] .. ", plot=" .. plot["plot"] .. ")")
+  --GenericObjectPool:returnConnection(client)
+
   local client = GenericObjectPool:connection(PlotServiceClient, "plot-service" .. k8s_suffix, 9090)
-  client:WritePlot(req_id, plot["plot_id"], plot["plot"], carrier)
+
+  local ok, err = pcall(
+    function()
+      client:WritePlot(
+        req_id, 
+        plot["plot_id"], 
+        plot["plot"], 
+        carrier
+      )
+    end
+  )
+
+  if not ok then
+      ngx.status = ngx.HTTP_INTERNAL_SERVER_ERROR
+      ngx.say("Failed to write plot: " .. tostring(err))
+      ngx.log(ngx.ERR, "WritePlot error: ", err)
+      GenericObjectPool:returnConnection(client)
+      return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+  end
+
+  ngx.say("successfully wrote plot (plot_id=" .. plot["plot_id"] .. ", plot=" .. plot["plot"] .. ")")
   GenericObjectPool:returnConnection(client)
 end
 

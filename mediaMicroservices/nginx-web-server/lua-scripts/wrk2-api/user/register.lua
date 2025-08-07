@@ -34,8 +34,8 @@ function _M.RegisterUser()
 
   local client = GenericObjectPool:connection(UserServiceClient, "user-service" .. k8s_suffix , 9090)
 
-  client:RegisterUser(req_id, post.first_name, post.last_name,
-      post.username, post.password, carrier)
+  client:RegisterUser(req_id, post.first_name, post.last_name, post.username, post.password, carrier)
+  ngx.say("successfully registered user (first_name=" .. post.first_name .. ", last_name=" .. post.last_name .. ", username=" .. post.username .. ")")
   GenericObjectPool:returnConnection(client)
 
   span:finish()

@@ -7,16 +7,24 @@ add_executable(
     ${THRIFT_GEN_CPP_DIR}/media_service_types.cpp
 )
 
+set(AWS_SDK_LIB_PATH /usr/local/lib)
+set(AWS_SDK_INCLUDE_PATH /usr/local/include)
+find_package(AWSSDK REQUIRED COMPONENTS dynamodb)
+
 target_include_directories(
     MovieIdService PRIVATE
     ${LIBMEMCACHED_INCLUDE_DIR}
     ${MONGOC_INCLUDE_DIRS}
+    ${AWS_SDK_INCLUDE_PATH}
     /usr/local/include/jaegertracing
 )
 
 target_link_libraries(
     MovieIdService
-    ${MONGOC_LIBRARIES}
+    ${AWSSDK_LINK_LIBRARIES}
+    ${CMAKE_DL_LIBS}
+    mongoc-1.0
+    bson-1.0
     ${LIBMEMCACHED_LIBRARIES}
     nlohmann_json::nlohmann_json
     ${THRIFT_LIB}

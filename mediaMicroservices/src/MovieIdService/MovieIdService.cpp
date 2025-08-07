@@ -3,6 +3,12 @@
 #include <thrift/transport/TServerSocket.h>
 #include <thrift/transport/TBufferTransports.h>
 #include <signal.h>
+#include <cstdlib>
+
+#include <aws/core/Aws.h>
+#include <aws/dynamodb/DynamoDBClient.h>
+#include <aws/dynamodb/model/PutItemRequest.h>
+#include <aws/dynamodb/model/GetItemRequest.h>
 
 #include "../utils.h"
 #include "../utils_memcached.h"
@@ -26,8 +32,18 @@ int main(int argc, char *argv[]) {
 
   SetUpTracer("config/jaeger-config.yml", "movie-id-service");
 
+  Aws::SDKOptions options;
+  Aws::InitAPI(options);
+
+  Aws::Client::ClientConfiguration config;
+  std::string aws_region = std::getenv("AWS_REGION");
+  std::string dynamo_table_name = "dsb-movie-id";
+  config.region = aws_region;
+  Aws::DynamoDB::DynamoDBClient dynamo_client(config);
+
   json config_json;
   if (load_config_file("config/service-config.json", &config_json) != 0) {
+    Aws::ShutdownAPI(options);
     exit(EXIT_FAILURE);
   }
 
@@ -71,13 +87,16 @@ int main(int argc, char *argv[]) {
       std::make_shared<MovieIdServiceProcessor>(
       std::make_shared<MovieIdHandler>(
               memcached_client_pool, mongodb_client_pool,
-              &compose_client_pool, &rating_client_pool)),
+              &compose_client_pool, &rating_client_pool,
+              &dynamo_client, aws_region, dynamo_table_name)),
       std::make_shared<TServerSocket>("0.0.0.0", port),
       std::make_shared<TFramedTransportFactory>(),
       std::make_shared<TBinaryProtocolFactory>()
   );
   std::cout << "Starting the movie-id-service server ..." << std::endl;
   server.serve();
+
+   Aws::ShutdownAPI(options);
 }
 
 

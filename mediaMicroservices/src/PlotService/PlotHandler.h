@@ -205,6 +205,8 @@ void PlotHandler::WritePlot(
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
+  LOG(info) << "received request to write plot (plot_id=" << plot_id << ", plot=" << plot.c_str() << ")";
+
   bson_t *new_doc = bson_new();
   BSON_APPEND_INT64(new_doc, "plot_id", plot_id);
   BSON_APPEND_UTF8(new_doc, "plot", plot.c_str());
@@ -233,7 +235,7 @@ void PlotHandler::WritePlot(
       collection, new_doc, nullptr, nullptr, &error);
   insert_span->Finish();
   if (!plotinsert) {
-    LOG(error) << "Error: Failed to insert plot to MongoDB: "
+    LOG(error) << "Error: Failed to insert plot to MongoDB  (plot_id=" << plot_id << ", plot=" << plot.c_str() << "): "
                << error.message;
     ServiceException se;
     se.errorCode = ErrorCode::SE_MONGODB_ERROR;

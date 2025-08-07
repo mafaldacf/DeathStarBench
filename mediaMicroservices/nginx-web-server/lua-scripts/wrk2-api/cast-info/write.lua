@@ -37,9 +37,35 @@ function _M.WriteCastInfo()
     ngx.exit(ngx.HTTP_BAD_REQUEST)
   end
 
+  --local client = GenericObjectPool:connection(CastInfoServiceClient, "cast-info-service" .. k8s_suffix, 9090)
+  --client:WriteCastInfo(req_id, cast_info["cast_info_id"], cast_info["name"], cast_info["gender"], cast_info["intro"],  carrier)
+  --ngx.say("successfully wrote cast info (cast_info_id=" .. cast_info["cast_info_id"] .. ", name=" .. cast_info["name"] .. ", gender=" .. cast_info["gender"] .. ", intro=" .. cast_info["intro"] .. ")")
+  --GenericObjectPool:returnConnection(client)
+
   local client = GenericObjectPool:connection(CastInfoServiceClient, "cast-info-service" .. k8s_suffix, 9090)
-  client:WriteCastInfo(req_id, cast_info["cast_info_id"], cast_info["name"],
-      cast_info["gender"], cast_info["intro"],  carrier)
+
+  local ok, err = pcall(
+    function()
+      client:WriteCastInfo(
+        req_id, 
+        cast_info["cast_info_id"], 
+        cast_info["name"], 
+        cast_info["gender"], 
+        cast_info["intro"], 
+        carrier
+    )
+    end
+  )
+
+  if not ok then
+      ngx.status = ngx.HTTP_INTERNAL_SERVER_ERROR
+      ngx.say("Failed to write cast info: " .. tostring(err))
+      ngx.log(ngx.ERR, "WriteCastInfo error: ", err)
+      GenericObjectPool:returnConnection(client)
+      return ngx.exit(ngx.HTTP_INTERNAL_SERVER_ERROR)
+  end
+
+  ngx.say("successfully wrote cast info (cast_info_id=" .. cast_info["cast_info_id"] .. ", name=" .. cast_info["name"] .. ", gender=" .. cast_info["gender"] .. ", intro=" .. cast_info["intro"] .. ")")
   GenericObjectPool:returnConnection(client)
 
 end

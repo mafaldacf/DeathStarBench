@@ -92,7 +92,7 @@ void CastInfoHandler::WriteCastInfo(
       collection, new_doc, nullptr, nullptr, &error);
   insert_span->Finish();
   if (!plotinsert) {
-    LOG(error) << "Error: Failed to insert cast-info to MongoDB: "
+    LOG(error) << "Error: Failed to insert cast-info to MongoDB (cast_info_id=" << cast_info_id << ", name=" << name.c_str() << ", gender=" << gender << ", intro=" << intro.c_str() << "): "
                << error.message;
     ServiceException se;
     se.errorCode = ErrorCode::SE_MONGODB_ERROR;

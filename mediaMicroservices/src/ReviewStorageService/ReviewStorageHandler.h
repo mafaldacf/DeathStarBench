@@ -52,6 +52,8 @@ void ReviewStorageHandler::StoreReview(
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
+  LOG(info) << "request to store review (movie_id=" << review.movie_id.c_str() << ", review_id=" << review.review_id << ")";
+
   mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
       _mongodb_client_pool);
   if (!mongodb_client) {
@@ -103,6 +105,8 @@ void ReviewStorageHandler::StoreReview(
   mongoc_collection_destroy(collection);
   mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
 
+  LOG(info) << "OK! (movie_id=" << review.movie_id.c_str() << ", review_id=" << review.review_id << ")";
+
   span->Finish();
 }
 void ReviewStorageHandler::ReadReviews(
@@ -120,6 +124,8 @@ void ReviewStorageHandler::ReadReviews(
       "ReadReviews",
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
+
+  LOG(info) << "received request to read reviews (number of review IDs=" << review_ids.size() << ")";
 
   if (review_ids.empty()) {
     return;
@@ -340,6 +346,7 @@ void ReviewStorageHandler::ReadReviews(
   }
 
   for (auto &review_id : review_ids) {
+    LOG(info) << "got review ID" << review_id;
     _return.emplace_back(return_map[review_id]);
   }
 
@@ -348,6 +355,8 @@ void ReviewStorageHandler::ReadReviews(
   } catch (...) {
     LOG(warning) << "Failed to set reviews to memcached";
   }
+
+  LOG(info) << "OK (number of review IDs=" << review_ids.size() << ")";
   
 }
 

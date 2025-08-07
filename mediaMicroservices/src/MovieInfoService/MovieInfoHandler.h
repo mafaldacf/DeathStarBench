@@ -224,6 +224,9 @@ void MovieInfoHandler::ReadMovieInfo(
     _return.avg_rating = movie_info_json["avg_rating"];
     _return.num_rating = movie_info_json["num_rating"];
     _return.plot_id = movie_info_json["plot_id"];
+
+    LOG(debug) << "movie_id=" << _return.movie_id << ", title=" << _return.title << ", plot_id=" << _return.plot_id;
+
     for (auto &item : movie_info_json["photo_ids"]) {
       _return.photo_ids.emplace_back(item);
     }
