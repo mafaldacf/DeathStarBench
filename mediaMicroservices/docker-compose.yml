@@ -159,6 +159,8 @@ services:
 #      - 10009:9090
     restart: always
     entrypoint: MovieReviewService
+    environment:
+      - COUCHDB_ADDRESS
 
   movie-review-mongodb:
     image: mongo:4.4.6
@@ -237,6 +239,8 @@ services:
 #      - 10012:9090
     restart: always
     entrypoint: MovieInfoService
+    environment:
+      - COUCHDB_ADDRESS
 
   movie-info-mongodb:
     image: mongo:4.4.6

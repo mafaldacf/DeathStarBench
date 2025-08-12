@@ -32,6 +32,10 @@ int main(int argc, char *argv[]) {
   }
 
   int port = config_json["movie-review-service"]["port"];
+
+  std::string couchdb_address = std::getenv("COUCHDB_ADDRESS");
+  std::string couchdb_url = "http://admin:admin@" + couchdb_address + "/mydb/";
+  
   std::string redis_addr =
       config_json["movie-review-redis"]["addr"];
   int redis_port = config_json["movie-review-redis"]["port"];
@@ -70,7 +74,8 @@ int main(int argc, char *argv[]) {
           std::make_shared<MovieReviewHandler>(
               &redis_client_pool,
               mongodb_client_pool,
-              &review_storage_client_pool)),
+              &review_storage_client_pool,
+              couchdb_url)),
       std::make_shared<TServerSocket>("0.0.0.0", port),
       std::make_shared<TFramedTransportFactory>(),
       std::make_shared<TBinaryProtocolFactory>()

@@ -20,43 +20,35 @@ function _M.ReadPage()
   local carrier = {}
   tracer:text_map_inject(span:context(), carrier)
 
-  ngx.req.read_body()
-  local data = ngx.req.get_body_data()
-
-  if not data then
+  local args = ngx.req.get_uri_args()
+  if (args.movie_id == nil or args.review_start == nil or args.review_stop == nil) then
     ngx.status = ngx.HTTP_BAD_REQUEST
-    ngx.say("Empty body")
-    ngx.log(ngx.ERR, "Empty body")
+    ngx.say("Incomplete arguments")
+    ngx.log(ngx.ERR, "Incomplete arguments")
     ngx.exit(ngx.HTTP_BAD_REQUEST)
   end
 
-  local args = ngx.req.get_post_args()
   local movie_id = args.movie_id
   local review_start = tonumber(args.review_start)
   local review_stop = tonumber(args.review_stop)
 
   local client = GenericObjectPool:connection(PageServiceClient, "page-service" .. k8s_suffix , 9090)
   local page = client:ReadPage(req_id, movie_id, review_start, review_stop)
-  
-  ngx.say("successfully read page (movie_id=" .. tostring(movie_id) .. "): "
-  .. "movie_id=" .. tostring(page.movie_info.movie_id)
-  .. ", title=" .. tostring(page.movie_info.title)
-  .. ", reviews:\n")
 
-  if page.movie_info.reviews then
-    for i, review in ipairs(page.movie_info.reviews) do
-      ngx.say(string.format(
-        "  Review #%d: review_id=%s, user_id=%s, rating=%d, text=%s, timestamp=%s",
-        i,
-        tostring(review.review_id),
-        tostring(review.user_id),
-        tonumber(review.rating) or 0,
-        tostring(review.text or ""),
-        tostring(review.timestamp)
-      ))
+  local cjson = require "cjson.safe"
+  cjson.encode_empty_table_as_object(false)
+
+  local mi = page and page.movie_info
+  local reviews = page and (page.reviews or (mi and mi.reviews))
+
+  ngx.say(string.format("successfully read page (movie_id=%s):", tostring(movie_id)))
+
+  if type(reviews) == "table" and #reviews > 0 then
+    for i, review in ipairs(reviews) do
+      ngx.say(string.format("\tReview #%d: text=%s", i, tostring(review.text or "")))
     end
   else
-    ngx.say("  (no reviews)")
+    ngx.say("\t(no reviews)")
   end
   
   GenericObjectPool:returnConnection(client)

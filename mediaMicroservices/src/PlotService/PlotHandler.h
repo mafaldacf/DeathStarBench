@@ -205,7 +205,7 @@ void PlotHandler::WritePlot(
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
-  LOG(info) << "received request to write plot (plot_id=" << plot_id << ", plot=" << plot.c_str() << ")";
+  LOG(info) << "REQUEST to write plot (plot_id=" << plot_id << ", plot=" << plot.c_str() << ")";
 
   bson_t *new_doc = bson_new();
   BSON_APPEND_INT64(new_doc, "plot_id", plot_id);

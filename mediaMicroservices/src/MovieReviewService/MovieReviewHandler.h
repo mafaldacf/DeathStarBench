@@ -14,6 +14,7 @@
 #include "../ClientPool.h"
 #include "../RedisClient.h"
 #include "../ThriftClient.h"
+#include "../utils_couchdb.h"
 
 namespace media_service {
 class MovieReviewHandler : public MovieReviewServiceIf {
@@ -21,7 +22,8 @@ class MovieReviewHandler : public MovieReviewServiceIf {
   MovieReviewHandler(
       ClientPool<RedisClient> *,
       mongoc_client_pool_t *,
-      ClientPool<ThriftClient<ReviewStorageServiceClient>> *);
+      ClientPool<ThriftClient<ReviewStorageServiceClient>> *,
+      std::string);
   ~MovieReviewHandler() override = default;
   void UploadMovieReview(int64_t, const std::string&, int64_t, int64_t,
                          const std::map<std::string, std::string> &) override;
@@ -33,15 +35,18 @@ class MovieReviewHandler : public MovieReviewServiceIf {
   ClientPool<RedisClient> *_redis_client_pool;
   mongoc_client_pool_t *_mongodb_client_pool;
   ClientPool<ThriftClient<ReviewStorageServiceClient>> *_review_client_pool;
+  std::string _couchdb_url;
 };
 
 MovieReviewHandler::MovieReviewHandler(
     ClientPool<RedisClient> *redis_client_pool,
     mongoc_client_pool_t *mongodb_pool,
-    ClientPool<ThriftClient<ReviewStorageServiceClient>> *review_storage_client_pool) {
+    ClientPool<ThriftClient<ReviewStorageServiceClient>> *review_storage_client_pool,
+    std::string couchdb_url) {
   _redis_client_pool = redis_client_pool;
   _mongodb_client_pool = mongodb_pool;
   _review_client_pool = review_storage_client_pool;
+  _couchdb_url = couchdb_url;
 }
 
 void MovieReviewHandler::UploadMovieReview(
@@ -63,101 +68,16 @@ void MovieReviewHandler::UploadMovieReview(
 
   LOG(info) << "request to upload movie review (movie_id=" << movie_id << ", review_id=" << review_id << ")";
 
-  mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-      _mongodb_client_pool);
-  if (!mongodb_client) {
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to pop a client from MongoDB pool";
+  try {
+    couchdb_append_review(_couchdb_url, movie_id, review_id, timestamp);
+    LOG(info) << "appended reviews (movie_id=" << movie_id << ") to couchdb";
+  } catch (const std::exception& e) {
+    LOG(debug) << "failed to write movie review (review_id=" << review_id << "to couchdb: " << e.what();
+    ServiceException se; 
+    se.errorCode = ErrorCode::SE_COUCHDB_ERROR; 
+    se.message = e.what(); 
     throw se;
   }
-
-  auto collection = mongoc_client_get_collection(
-      mongodb_client, "movie-review", "movie-review");
-  if (!collection) {
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to create collection movie-review from DB movie-review";
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-    throw se;
-  }
-
-  bson_t *query = bson_new();
-  BSON_APPEND_UTF8(query, "movie_id", movie_id.c_str());
-  auto find_span = opentracing::Tracer::Global()->StartSpan(
-      "MongoFindMovie", {opentracing::ChildOf(&span->context())});
-  mongoc_cursor_t *cursor = mongoc_collection_find_with_opts(
-      collection, query, nullptr, nullptr);
-  const bson_t *doc;
-  bool found = mongoc_cursor_next(cursor, &doc);
-  if (!found) {
-    bson_t *new_doc = BCON_NEW(
-        "movie_id", BCON_UTF8(movie_id.c_str()),
-        "reviews",
-        "[", "{", "review_id", BCON_INT64(review_id),
-        "timestamp", BCON_INT64(timestamp), "}", "]"
-    );
-    bson_error_t error;
-    auto insert_span = opentracing::Tracer::Global()->StartSpan(
-        "MongoInsert", {opentracing::ChildOf(&span->context())});
-    bool plotinsert = mongoc_collection_insert_one(
-        collection, new_doc, nullptr, nullptr, &error);
-    insert_span->Finish();
-    if (!plotinsert) {
-      LOG(error) << "Failed to insert movie review of movie " << movie_id
-                 << " to MongoDB: " << error.message;
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = error.message;
-      bson_destroy(new_doc);
-      bson_destroy(query);
-      mongoc_cursor_destroy(cursor);
-      mongoc_collection_destroy(collection);
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-      throw se;
-    }
-    bson_destroy(new_doc);
-  } else {
-    bson_t *update = BCON_NEW(
-        "$push", "{",
-        "reviews", "{",
-        "$each", "[", "{",
-        "review_id", BCON_INT64(review_id),
-        "timestamp", BCON_INT64(timestamp),
-        "}", "]",
-        "$position", BCON_INT32(0),
-        "}",
-        "}"
-    );
-    bson_error_t error;
-    bson_t reply;
-    auto update_span = opentracing::Tracer::Global()->StartSpan(
-        "MongoUpdate.", {opentracing::ChildOf(&span->context())});
-    bool plotupdate = mongoc_collection_find_and_modify(
-        collection, query, nullptr, update, nullptr, false, false,
-        true, &reply, &error);
-    update_span->Finish();
-    if (!plotupdate) {
-      LOG(error) << "Failed to update movie-review for movie " << movie_id
-                 << " to MongoDB: " << error.message;
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = error.message;
-      bson_destroy(update);
-      bson_destroy(query);
-      bson_destroy(&reply);
-      mongoc_cursor_destroy(cursor);
-      mongoc_collection_destroy(collection);
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-      throw se;
-    }
-    bson_destroy(update);
-    bson_destroy(&reply);
-  }
-  bson_destroy(query);
-  mongoc_cursor_destroy(cursor);
-  mongoc_collection_destroy(collection);
-  mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
 
   auto redis_client_wrapper = _redis_client_pool->Pop();
   if (!redis_client_wrapper) {
@@ -202,7 +122,7 @@ void MovieReviewHandler::ReadMovieReviews(
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
-  LOG(info) << "received request to read movie reviews (movie_id=" << movie_id << ", start=" << start << ", stop=" << stop << ")";
+  LOG(info) << "REQUEST to read movie reviews (movie_id=" << movie_id << ", start=" << start << ", stop=" << stop << ")";
 
   if (stop <= start || start < 0) {
     return;
@@ -239,81 +159,18 @@ void MovieReviewHandler::ReadMovieReviews(
     review_ids.emplace_back(std::stoul(review_id_reply.as_string()));
   }
 
-  int mongo_start = start + review_ids.size();
+  // TODO: save to redis
   std::multimap<std::string, std::string> redis_update_map;
-  if (mongo_start < stop) {
-    // Instead find review_ids from mongodb
-    mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-        _mongodb_client_pool);
-    if (!mongodb_client) {
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to pop a client from MongoDB pool";
-      throw se;
-    }
-    auto collection = mongoc_client_get_collection(
-        mongodb_client, "movie-review", "movie-review");
-    if (!collection) {
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to create collection movie-review from MongoDB";
-      throw se;
-    }
 
-    bson_t *query = BCON_NEW("movie_id", BCON_UTF8(movie_id.c_str()));
-    bson_t *opts = BCON_NEW(
-        "projection", "{",
-        "reviews", "{",
-        "$slice", "[",
-        BCON_INT32(0), BCON_INT32(stop),
-        "]", "}", "}");
-    auto find_span = opentracing::Tracer::Global()->StartSpan(
-        "MongoFindMovieReviews", {opentracing::ChildOf(&span->context())});
-    mongoc_cursor_t *cursor = mongoc_collection_find_with_opts(
-        collection, query, opts, nullptr);
-    find_span->Finish();
-    const bson_t *doc;
-    bool found = mongoc_cursor_next(cursor, &doc);
-    LOG(info) << "query to MongoDB with found = " << found;
-    if (found) {
-      bson_iter_t iter_0;
-      bson_iter_t iter_1;
-      bson_iter_t review_id_child;
-      bson_iter_t timestamp_child;
-      int idx = 0;
-      bson_iter_init(&iter_0, doc);
-      bson_iter_init(&iter_1, doc);
-      while (bson_iter_find_descendant(&iter_0,
-                                       ("reviews." + std::to_string(idx)
-                                           + ".review_id").c_str(),
-                                       &review_id_child)
-          && BSON_ITER_HOLDS_INT64(&review_id_child)
-          && bson_iter_find_descendant(&iter_1,
-                                       ("reviews." + std::to_string(idx)
-                                           + ".timestamp").c_str(),
-                                       &timestamp_child)
-          && BSON_ITER_HOLDS_INT64(&timestamp_child)) {
-        auto curr_review_id = bson_iter_int64(&review_id_child);
-        auto curr_timestamp = bson_iter_int64(&timestamp_child);
-        LOG(info) << "got review id from MongoDB: " << curr_review_id;
-        if (idx >= mongo_start) {
-          LOG(info) << "adding review id from MongoDB: " << curr_review_id;
-          review_ids.emplace_back(curr_review_id);
-
-        }
-        redis_update_map.insert(
-            {std::to_string(curr_timestamp), std::to_string(curr_review_id)});
-        bson_iter_init(&iter_0, doc);
-        bson_iter_init(&iter_1, doc);
-        idx++;
-      }
-    }
-    find_span->Finish();
-    bson_destroy(opts);
-    bson_destroy(query);
-    mongoc_cursor_destroy(cursor);
-    mongoc_collection_destroy(collection);
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+  try {
+    review_ids = couchdb_load_review_ids(_couchdb_url, movie_id);
+    LOG(info) << "got reviews (movie_id=" << movie_id << ") from couchdb";
+  } catch (const std::exception& e) {
+    LOG(debug) << "failed to load review ids (movie_id= " << movie_id << ") from couchdb: " << e.what();
+    ServiceException se;
+    se.errorCode = ErrorCode::SE_COUCHDB_ERROR;
+    se.message = e.what();
+    throw se;
   }
 
   std::future<std::vector<Review>> review_future = std::async(
@@ -362,6 +219,7 @@ void MovieReviewHandler::ReadMovieReviews(
 
   try {
     _return = review_future.get();
+    LOG(info) << "got (" << _return.size() << ") reviews from ReviewStorage";
   } catch (...) {
     LOG(error) << "Failed to get review from review-storage-service";
     if (!redis_update_map.empty()) {

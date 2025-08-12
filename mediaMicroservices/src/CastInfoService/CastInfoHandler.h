@@ -333,11 +333,11 @@ void CastInfoHandler::ReadCastInfo(
     } catch (...) {
       LOG(warning) << "Failed to set cast-info to memcached";
     }
-    LOG(error) << "cast-info-service return set incomplete";
-    ServiceException se;
+    LOG(warning) << "cast-info-service return set incomplete";
+    /* ServiceException se;
     se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
     se.message = "cast-info-service return set incomplete";
-    throw se;
+    throw se; */
   }
 
   for (auto &cast_info_id : cast_info_ids) {

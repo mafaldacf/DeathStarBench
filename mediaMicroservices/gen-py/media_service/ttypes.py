@@ -23,7 +23,9 @@ class ErrorCode(object):
     SE_MEMCACHED_ERROR = 3
     SE_MONGODB_ERROR = 4
     SE_REDIS_ERROR = 5
-    SE_THRIFT_HANDLER_ERROR = 6
+    SE_DYNAMODB_ERROR = 6
+    SE_COUCHDB_ERROR = 7
+    SE_THRIFT_HANDLER_ERROR = 8
 
     _VALUES_TO_NAMES = {
         0: "SE_THRIFT_CONNPOOL_TIMEOUT",
@@ -32,7 +34,9 @@ class ErrorCode(object):
         3: "SE_MEMCACHED_ERROR",
         4: "SE_MONGODB_ERROR",
         5: "SE_REDIS_ERROR",
-        6: "SE_THRIFT_HANDLER_ERROR",
+        6: "SE_DYNAMODB_ERROR",
+        7: "SE_COUCHDB_ERROR",
+        8: "SE_THRIFT_HANDLER_ERROR",
     }
 
     _NAMES_TO_VALUES = {
@@ -42,7 +46,9 @@ class ErrorCode(object):
         "SE_MEMCACHED_ERROR": 3,
         "SE_MONGODB_ERROR": 4,
         "SE_REDIS_ERROR": 5,
-        "SE_THRIFT_HANDLER_ERROR": 6,
+        "SE_DYNAMODB_ERROR": 6,
+        "SE_COUCHDB_ERROR": 7,
+        "SE_THRIFT_HANDLER_ERROR": 8,
     }
 
 

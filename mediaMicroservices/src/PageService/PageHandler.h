@@ -65,6 +65,8 @@ void PageHandler::ReadPage(
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
+  LOG(info) << "REQUEST to read page (movie_id=" << movie_id << ", review_start=" << review_start << ", review_stop=" << review_stop << ")";
+
   std::future<std::vector<Review>> movie_review_future;
   std::future<MovieInfo> movie_info_future;
   std::future<std::vector<CastInfo>> cast_info_future;
@@ -171,11 +173,14 @@ void PageHandler::ReadPage(
 
   try {
     _return.reviews = movie_review_future.get();
+    LOG(info) << "got (" << _return.reviews.size() << ") reviews from MovieReview";
     _return.plot = plot_future.get();
     _return.cast_infos = cast_info_future.get();
   } catch (...) {
     throw;
   }
+
+  LOG(info) << "OK (movie_id=" << movie_id << ", review_start=" << review_start << ", review_stop=" << review_stop << ")";
   span->Finish();
 }
 

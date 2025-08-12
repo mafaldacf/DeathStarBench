@@ -20,27 +20,19 @@ function _M.ReadMovieInfo()
   local carrier = {}
   tracer:text_map_inject(span:context(), carrier)
 
-  ngx.req.read_body()
-  local data = ngx.req.get_body_data()
-
-  if not data then
-    ngx.status = ngx.HTTP_BAD_REQUEST
-    ngx.say("Empty body")
-    ngx.log(ngx.ERR, "Empty body")
-    ngx.exit(ngx.HTTP_BAD_REQUEST)
-  end
-
-  local params = cjson.decode(data)
-  if (params["movie_id"] == nil) then
+  local args = ngx.req.get_uri_args()
+  if (args.movie_id == nil) then
     ngx.status = ngx.HTTP_BAD_REQUEST
     ngx.say("Incomplete arguments")
     ngx.log(ngx.ERR, "Incomplete arguments")
     ngx.exit(ngx.HTTP_BAD_REQUEST)
   end
+
+  local movie_id = args.movie_id
   
   local client = GenericObjectPool:connection(MovieInfoServiceClient, "movie-info-service" .. k8s_suffix , 9090)
-  local movie_info = client:ReadMovieInfo(req_id, params["movie_id"])
-  ngx.say(string.format("successfully read movie (movie_id=%s): title=%s, avg_rating=%g, plot_id=%s", params["movie_id"], movie_info.title, movie_info.avg_rating, tostring(movie_info.plot_id)))
+  local movie_info = client:ReadMovieInfo(req_id, movie_id)
+  ngx.say(string.format("successfully read movie (movie_id=%s): title=%s, avg_rating=%g, plot_id=%s", movie_id, movie_info.title, movie_info.avg_rating, tostring(movie_info.plot_id)))
   GenericObjectPool:returnConnection(client)
 
 end

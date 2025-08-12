@@ -125,9 +125,10 @@ void ReviewStorageHandler::ReadReviews(
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
-  LOG(info) << "received request to read reviews (number of review IDs=" << review_ids.size() << ")";
+  LOG(info) << "REQUEST to read reviews (number of review IDs=" << review_ids.size() << ")";
 
   if (review_ids.empty()) {
+    LOG(info) << "OK (number of review IDs=" << review_ids.size() << ")";
     return;
   }
 
@@ -338,11 +339,11 @@ void ReviewStorageHandler::ReadReviews(
     } catch (...) {
       LOG(warning) << "Failed to set reviews to memcached";
     }
-    LOG(error) << "review storage service: return set incomplete";
-    ServiceException se;
+    LOG(warning) << "review storage service: return set incomplete";
+    /* ServiceException se;
     se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
     se.message = "review storage service: return set incomplete";
-    throw se;
+    throw se; */
   }
 
   for (auto &review_id : review_ids) {

@@ -20,6 +20,8 @@ int _kErrorCodeValues[] = {
   ErrorCode::SE_MEMCACHED_ERROR,
   ErrorCode::SE_MONGODB_ERROR,
   ErrorCode::SE_REDIS_ERROR,
+  ErrorCode::SE_DYNAMODB_ERROR,
+  ErrorCode::SE_COUCHDB_ERROR,
   ErrorCode::SE_THRIFT_HANDLER_ERROR
 };
 const char* _kErrorCodeNames[] = {
@@ -29,6 +31,8 @@ const char* _kErrorCodeNames[] = {
   "SE_MEMCACHED_ERROR",
   "SE_MONGODB_ERROR",
   "SE_REDIS_ERROR",
+  "SE_DYNAMODB_ERROR",
+  "SE_COUCHDB_ERROR",
   "SE_THRIFT_HANDLER_ERROR"
 };
 const std::map<int, const char*> _ErrorCode_VALUES_TO_NAMES(::apache::thrift::TEnumIterator(7, _kErrorCodeValues, _kErrorCodeNames), ::apache::thrift::TEnumIterator(-1, NULL, NULL));

@@ -82,6 +82,7 @@ function _M.ComposeReview()
     end
   end
   span:finish()
+  ngx.say(string.format("successfully composed movie review (title=%s, text=%s)", post.title, post.text))
   ngx.exit(status)
 
 end

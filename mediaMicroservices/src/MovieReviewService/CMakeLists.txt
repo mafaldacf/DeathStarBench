@@ -9,6 +9,7 @@ add_executable(
 target_include_directories(
     MovieReviewService PRIVATE
     ${MONGOC_INCLUDE_DIRS}
+    ${CURL_INCLUDE_DIRS}
     /usr/local/include/jaegertracing
     /usr/local/include/cpp_redis
 )
@@ -16,8 +17,9 @@ target_include_directories(
 target_link_libraries(
     MovieReviewService
     ${MONGOC_LIBRARIES}
+    ${CURL_LIBRARIES}
     nlohmann_json::nlohmann_json
-  ${THRIFT_LIB}
+    ${THRIFT_LIB}
     ${Boost_LIBRARIES}
     Boost::log
     Boost::log_setup
