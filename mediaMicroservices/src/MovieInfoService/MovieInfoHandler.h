@@ -98,7 +98,7 @@ void MovieInfoHandler::WriteMovieInfo(
 
   std::string url = _couchdb_url + movie_id;
   try {
-    couchdb_do_http_put(url, new_doc.dump());
+    couchdb_put(url, new_doc.dump());
     LOG(info) << "wrote movie (movie_id=" << movie_id << ") to CouchDB";
   } catch (const std::exception &e) {
       LOG(debug) << "failed to write movie (movie_id=" << movie_id << ") to CouchDB: " << e.what();
@@ -195,7 +195,7 @@ void MovieInfoHandler::ReadMovieInfo(
     std::string url = _couchdb_url + movie_id;
     std::string response;
     try {
-      response = couchdb_do_http_get(url);
+      response = couchdb_get(url);
       LOG(info) << "read movie (movie_id=" << movie_id << ") from CouchDB";
     } catch (const std::exception &e) {
       LOG(debug) << "failed to read movie (movie_id=" << movie_id << ") from CouchDB: " << e.what();

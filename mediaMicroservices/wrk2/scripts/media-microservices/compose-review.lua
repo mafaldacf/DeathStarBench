@@ -603,7 +603,7 @@ local movie_titles = {
   "The Prince & Me",
   "Agent Cody Banks",
   "Friday the 13th Part III",
-  "Dracula 2000",
+  "Dracula 2999",
   "Bill & Ted's Bogus Journey",
   "Lake Placid",
   "War for the Planet of the Apes",

@@ -33,6 +33,9 @@ int main(int argc, char *argv[]) {
 
   int port = config_json["plot-service"]["port"];
 
+  std::string couchdb_address = std::getenv("COUCHDB_ADDRESS");
+  std::string couchdb_url = "http://admin:admin@" + couchdb_address + "/plot/";
+
   memcached_pool_st *memcached_client_pool =
       init_memcached_client_pool(config_json, "plot", 32, 128);
   mongoc_client_pool_t* mongodb_client_pool =
@@ -60,7 +63,8 @@ int main(int argc, char *argv[]) {
   TThreadedServer server(
       std::make_shared<PlotServiceProcessor>(
       std::make_shared<PlotHandler>(
-              memcached_client_pool, mongodb_client_pool)),
+              memcached_client_pool, mongodb_client_pool,
+              couchdb_url)),
       std::make_shared<TServerSocket>("0.0.0.0", port),
       std::make_shared<TFramedTransportFactory>(),
       std::make_shared<TBinaryProtocolFactory>()

@@ -34,7 +34,7 @@ int main(int argc, char *argv[]) {
   int port = config_json["movie-info-service"]["port"];
 
   std::string couchdb_address = std::getenv("COUCHDB_ADDRESS");
-  std::string couchdb_url = "http://admin:admin@" + couchdb_address + "/mydb/";
+  std::string couchdb_url = "http://admin:admin@" + couchdb_address + "/movieinfo/";
 
   memcached_pool_st *memcached_client_pool =
       init_memcached_client_pool(config_json, "movie-info",

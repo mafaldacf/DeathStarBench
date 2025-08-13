@@ -13,7 +13,7 @@ namespace media_service {
     return total;
   }
 
-  static std::string couchdb_do_http_get(const std::string &url) {
+  static std::string couchdb_get(const std::string &url) {
     CURL *curl = curl_easy_init();
     if (!curl) throw std::runtime_error("curl_easy_init failed");
 
@@ -21,9 +21,7 @@ namespace media_service {
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _couchdb_curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 2000L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 5000L);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L); // let us read couchdb error bodies
 
     CURLcode rc = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
@@ -33,7 +31,36 @@ namespace media_service {
     return resp;
   }
 
-  static std::string couchdb_do_http_put(const std::string &url, const std::string &json_body) {
+  static long couchdb_put_if_absent(const std::string& url, const std::string& json_body) {
+    CURL* curl = curl_easy_init();
+    if (!curl) throw std::runtime_error("curl_easy_init failed");
+
+    std::string resp;
+    struct curl_slist* headers = nullptr;
+    headers = curl_slist_append(headers, "content-type: application/json");
+    headers = curl_slist_append(headers, "If-None-Match: *");
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_CUSTOMREQUEST, "PUT");
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _couchdb_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L);
+
+    CURLcode rc = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK) {
+      throw std::runtime_error(std::string("http put failed: ") + curl_easy_strerror(rc));
+    }
+    return http_code;
+  }
+
+  static std::string couchdb_put(const std::string &url, const std::string &json_body) {
     CURL *curl = curl_easy_init();
     if (!curl) throw std::runtime_error("curl_easy_init failed");
 
@@ -47,9 +74,7 @@ namespace media_service {
     curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _couchdb_curl_write_cb);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
-    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, 2000L);
-    curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, 5000L);
-    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L); // let us read couchdb error bodies
 
     CURLcode rc = curl_easy_perform(curl);
     curl_slist_free_all(headers);
@@ -61,8 +86,35 @@ namespace media_service {
     return resp;
   }
 
+  static std::string couchdb_post(const std::string &url, const std::string &json_body) {
+    CURL *curl = curl_easy_init();
+    if (!curl) throw std::runtime_error("curl_easy_init failed");
+
+    std::string resp;
+    struct curl_slist *headers = nullptr;
+    headers = curl_slist_append(headers, "content-type: application/json");
+
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+    curl_easy_setopt(curl, CURLOPT_POST, 1L);
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_body.c_str());
+    curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, static_cast<long>(json_body.size())); // binary-safe
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, _couchdb_curl_write_cb);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &resp);
+    curl_easy_setopt(curl, CURLOPT_FAILONERROR, 0L); // let us read couchdb error bodies
+
+    CURLcode rc = curl_easy_perform(curl);
+    curl_slist_free_all(headers);
+    curl_easy_cleanup(curl);
+
+    if (rc != CURLE_OK) {
+      throw std::runtime_error(std::string("http post failed: ") + curl_easy_strerror(rc));
+    }
+    return resp;
+  }
+
   static std::vector<int64_t> couchdb_load_review_ids(const std::string& base, const std::string& movie_id) {
-    auto body = couchdb_do_http_get(base + movie_id);
+    auto body = couchdb_get(base + movie_id);
     auto j = json::parse(body);
     std::vector<int64_t> ids;
     if (j.contains("reviews") && j["reviews"].is_array()) {
@@ -80,7 +132,7 @@ namespace media_service {
     json doc;
     std::string body;
     try {
-      body = couchdb_do_http_get(url);
+      body = couchdb_get(url);
       doc = json::parse(body);
       if (!doc.contains("reviews") || !doc["reviews"].is_array()) doc["reviews"] = json::array();
       doc["reviews"].push_back(json{{"review_id", review_id},{"timestamp", timestamp}});
@@ -93,7 +145,7 @@ namespace media_service {
     }
 
     // first put
-    couchdb_do_http_put(url, doc.dump());
+    couchdb_put(url, doc.dump());
   }
 
 

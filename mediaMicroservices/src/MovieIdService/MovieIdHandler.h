@@ -9,6 +9,8 @@
 #include <libmemcached/memcached.h>
 #include <libmemcached/util.h>
 #include <bson/bson.h>
+#include <nlohmann/json.hpp>
+#include "../utils_couchdb.h"
 
 #include <aws/core/Aws.h>
 #include <aws/dynamodb/DynamoDBClient.h>
@@ -26,8 +28,12 @@
 
 namespace media_service {
 
+using json = nlohmann::json;
+
 class MovieIdHandler : public MovieIdServiceIf {
  public:
+   enum class BackendType { CouchDB, DynamoDB };
+
   MovieIdHandler(
       memcached_pool_st *,
       mongoc_client_pool_t *,
@@ -35,7 +41,9 @@ class MovieIdHandler : public MovieIdServiceIf {
       ClientPool<ThriftClient<RatingServiceClient>> *,
       Aws::DynamoDB::DynamoDBClient*,
       std::string,
-      std::string);
+      std::string,
+      std::string,
+      BackendType);
   ~MovieIdHandler() override = default;
   void UploadMovieId(int64_t, const std::string &, int32_t,
                      const std::map<std::string, std::string> &) override;
@@ -50,6 +58,8 @@ class MovieIdHandler : public MovieIdServiceIf {
   Aws::DynamoDB::DynamoDBClient *_dynamo_client;
   std::string _aws_region;
   std::string _dynamo_table_name;
+  std::string _couchdb_url;
+  BackendType _backend;
 };
 
 MovieIdHandler::MovieIdHandler(
@@ -59,7 +69,9 @@ MovieIdHandler::MovieIdHandler(
     ClientPool<ThriftClient<RatingServiceClient>> *rating_client_pool,
     Aws::DynamoDB::DynamoDBClient *dynamo_client,
     std::string aws_region,
-    std::string dynamo_table_name) {
+    std::string dynamo_table_name,
+    std::string couchdb_url,
+    BackendType backend) {
   _memcached_client_pool = memcached_client_pool;
   _mongodb_client_pool = mongodb_client_pool;
   _compose_client_pool = compose_client_pool;
@@ -67,6 +79,8 @@ MovieIdHandler::MovieIdHandler(
   _dynamo_client = dynamo_client;
   _aws_region = aws_region;
   _dynamo_table_name = dynamo_table_name;
+  _couchdb_url = couchdb_url;
+  _backend = backend;
 }
 
 void MovieIdHandler::UploadMovieId(
@@ -84,6 +98,9 @@ void MovieIdHandler::UploadMovieId(
       "UploadMovieId",
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
+
+  LOG(info) << "REQUEST to upload movie id (title=" << title << ", rating=" << rating << ")";
+
 
   memcached_return_t memcached_rc;
   memcached_st *memcached_client = memcached_pool_pop(
@@ -130,54 +147,97 @@ void MovieIdHandler::UploadMovieId(
 
   // if not cached in memcached
   else {
-    auto get_span = opentracing::Tracer::Global()->StartSpan(
-        "DynamoGetMovieId", { opentracing::ChildOf(&span->context()) });
-
-    Aws::DynamoDB::Model::GetItemRequest get_req;
-    get_req.SetTableName(_dynamo_table_name);
-
-    Aws::Map<Aws::String, Aws::DynamoDB::Model::AttributeValue> key;
-    Aws::DynamoDB::Model::AttributeValue title_key;
-    title_key.SetS(title);
-    key.emplace("title", std::move(title_key));
-    get_req.SetKey(std::move(key));
-
-    auto response = _dynamo_client->GetItem(get_req);
-    get_span->Finish();
-
-    if (!response.IsSuccess()) {
-      const auto& err = response.GetError();
-      LOG(error) << "failed to get item from dynamo (region=" << _aws_region << ", table= " << _dynamo_table_name << "): " << err.GetMessage();
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-      se.message = err.GetMessage();
-      free(movie_id_mmc);
-      throw se;
+    if (_backend == BackendType::CouchDB) {
+      // --------------------------------------------------
+      // ----------------- COUCHDB WRITE ------------------
+      // --------------------------------------------------
+      auto get_span = opentracing::Tracer::Global()->StartSpan(
+          "CouchDBGetMovieId", { opentracing::ChildOf(&span->context()) });
+  
+      const std::string url = _couchdb_url + title;
+      std::string resp;
+  
+      try {
+        resp = couchdb_get(url);
+        LOG(debug) << "found mapping for title=" << title << " in CouchDB";
+      } catch (const std::exception &e) {
+        LOG(error) << "movie " << title << " not found in CouchDB: " << e.what();
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Movie " + title + " not found in CouchDB";
+        throw se;
+      }
+  
+      auto j = json::parse(resp);
+      if (!j.contains("movie_id") || !j["movie_id"].is_string()) {
+        LOG(error) << "attribute movie_id is missing in CouchDB doc for title=" << title;
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Attribute movie_id missing in CouchDB doc";
+        throw se;
+      }
+      get_span->Finish();
+  
+      movie_id_str = j["movie_id"].get<std::string>();
+      LOG(debug) << "found movie " << movie_id_str << " cache miss (CouchDB)";
     }
 
-    const auto& item = response.GetResult().GetItem();
-    if (item.empty()) {
-      // title not found
-      LOG(error) << "movie " << title << " not found in dynamodb";
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-      se.message = "Movie " + title + " not found in DynamoDB";
-      free(movie_id_mmc);
-      throw se;
+    else if (_backend == BackendType::DynamoDB) {
+      // --------------------------------------------------
+      // ---------------- DYNAMODB WRITE ------------------
+      // --------------------------------------------------
+      auto get_span = opentracing::Tracer::Global()->StartSpan(
+          "DynamoGetMovieId", { opentracing::ChildOf(&span->context()) });
+  
+      Aws::DynamoDB::Model::GetItemRequest get_req;
+      get_req.SetTableName(_dynamo_table_name);
+  
+      Aws::Map<Aws::String, Aws::DynamoDB::Model::AttributeValue> key;
+      Aws::DynamoDB::Model::AttributeValue title_key;
+      title_key.SetS(title);
+      key.emplace("title", std::move(title_key));
+      get_req.SetKey(std::move(key));
+  
+      auto response = _dynamo_client->GetItem(get_req);
+      get_span->Finish();
+  
+      if (!response.IsSuccess()) {
+        const auto& err = response.GetError();
+        LOG(error) << "failed to get item from dynamo (region=" << _aws_region << ", table= " << _dynamo_table_name << "): " << err.GetMessage();
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = err.GetMessage();
+        free(movie_id_mmc);
+        throw se;
+      }
+  
+      const auto& item = response.GetResult().GetItem();
+      if (item.empty()) {
+        // title not found
+        LOG(error) << "movie " << title << " not found in dynamodb";
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Movie " + title + " not found in DynamoDB";
+        free(movie_id_mmc);
+        throw se;
+      }
+
+      auto it = item.find("movie_id");
+      if (it == item.end()) {
+        LOG(error) << "attribute movie_id does not exist in item";
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Attribute movie_id does not exist in item";
+        free(movie_id_mmc);
+        throw se;
+      }
+
+      movie_id_str = it->second.GetS();
+      LOG(debug) << "found movie " << movie_id_str << " cache miss (dynamodb)";
+      // --------------------------------------------------
+      // --------------------------------------------------
     }
 
-    auto it = item.find("movie_id");
-    if (it == item.end()) {
-      LOG(error) << "attribute movie_id does not exist in item";
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-      se.message = "Attribute movie_id does not exist in item";
-      free(movie_id_mmc);
-      throw se;
-    }
-
-    movie_id_str = it->second.GetS();
-    LOG(debug) << "found movie " << movie_id_str << " cache miss (dynamodb)";
   }
   
   std::future<void> set_future;
@@ -252,6 +312,7 @@ void MovieIdHandler::UploadMovieId(
     throw;
   }
 
+  LOG(info) << "OK (title=" << title << ", rating=" << rating << ")";
   span->Finish();
 }
 
@@ -271,39 +332,68 @@ void MovieIdHandler::RegisterMovieId (
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
-  Aws::DynamoDB::Model::PutItemRequest req;
-  req.SetTableName(_dynamo_table_name);
+  LOG(info) << "REQUEST to register movie id (title=" << title << ", movie_id=" << movie_id << ")";
 
-  Aws::DynamoDB::Model::AttributeValue title_attr;
-  title_attr.SetS(title);
-  req.AddItem("title", title_attr);
+  json doc;
+  doc["_id"] = title;
+  doc["title"] = title;
+  doc["movie_id"] = movie_id;
+  const std::string url = _couchdb_url + title;
 
-  Aws::DynamoDB::Model::AttributeValue movie_id_attr;
-  movie_id_attr.SetS(movie_id);
-  req.AddItem("movie_id", movie_id_attr);
-
-  Aws::DynamoDB::Model::AttributeValue region_attr;
-  region_attr.SetS(_aws_region);
-  req.AddItem("region", region_attr);
-
-  req.SetConditionExpression("attribute_not_exists(title)");
-
-  auto response = _dynamo_client->PutItem(req);
-
-  if (!response.IsSuccess()) {
-    const auto& err = response.GetError();
-    LOG(error) << "failed to insert to dynamo (region=" << _aws_region << ", table= " << _dynamo_table_name << "): " << err.GetMessage();
-    ServiceException se;
-    if (err.GetErrorType() == Aws::DynamoDB::DynamoDBErrors::CONDITIONAL_CHECK_FAILED) {
+  if (_backend == BackendType::CouchDB) {
+    // --------------------------------------------------
+    // ----------------- COUCHDB WRITE ------------------
+    // --------------------------------------------------
+    try {
+      couchdb_put_if_absent(url, doc.dump());
+      LOG(info) << "registered movie mapping in CouchDB (title=" << title
+                << ", movie_id=" << movie_id << ")";
+    } catch (const std::exception &e) {
+      ServiceException se;
       se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-      se.message = "Movie " + title + " already existed in DynamoDB";
-    } else {
-      se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-      se.message = err.GetMessage();
+      se.message = std::string("Failed to register movie mapping in CouchDB: ") + e.what();
+      throw se;
     }
-    throw se;
   }
-
+  else if (_backend == BackendType::DynamoDB) {
+    // --------------------------------------------------
+    // ---------------- DYNAMODB WRITE ------------------
+    // --------------------------------------------------
+    Aws::DynamoDB::Model::PutItemRequest req;
+    req.SetTableName(_dynamo_table_name);
+  
+    Aws::DynamoDB::Model::AttributeValue title_attr;
+    title_attr.SetS(title);
+    req.AddItem("title", title_attr);
+  
+    Aws::DynamoDB::Model::AttributeValue movie_id_attr;
+    movie_id_attr.SetS(movie_id);
+    req.AddItem("movie_id", movie_id_attr);
+  
+    Aws::DynamoDB::Model::AttributeValue region_attr;
+    region_attr.SetS(_aws_region);
+    req.AddItem("region", region_attr);
+  
+    req.SetConditionExpression("attribute_not_exists(title)");
+  
+    auto response = _dynamo_client->PutItem(req);
+  
+    if (!response.IsSuccess()) {
+      const auto& err = response.GetError();
+      LOG(error) << "failed to insert to dynamo (region=" << _aws_region << ", table= " << _dynamo_table_name << "): " << err.GetMessage();
+      ServiceException se;
+      if (err.GetErrorType() == Aws::DynamoDB::DynamoDBErrors::CONDITIONAL_CHECK_FAILED) {
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Movie " + title + " already existed in DynamoDB";
+      } else {
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = err.GetMessage();
+      }
+      throw se;
+    }
+  }
+  
+  LOG(info) << "OK (title=" << title << ", movie_id=" << movie_id << ")";
   span->Finish();
 }
 } // namespace media_service

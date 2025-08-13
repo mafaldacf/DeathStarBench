@@ -8,6 +8,8 @@
 #include <libmemcached/util.h>
 #include <mongoc.h>
 #include <bson/bson.h>
+#include <nlohmann/json.hpp>
+#include "../utils_couchdb.h"
 
 #include "../../gen-cpp/PlotService.h"
 #include "../logger.h"
@@ -15,11 +17,14 @@
 
 namespace media_service {
 
+  using json = nlohmann::json;
+  
 class PlotHandler : public PlotServiceIf {
  public:
   PlotHandler(
       memcached_pool_st *,
-      mongoc_client_pool_t *);
+      mongoc_client_pool_t *,
+      std::string);
   ~PlotHandler() override = default;
 
   void WritePlot(int64_t req_id, int64_t plot_id, const std::string& plot,
@@ -30,13 +35,16 @@ class PlotHandler : public PlotServiceIf {
  private:
   memcached_pool_st *_memcached_client_pool;
   mongoc_client_pool_t *_mongodb_client_pool;
+  std::string _couchdb_url;
 };
 
 PlotHandler::PlotHandler(
     memcached_pool_st *memcached_client_pool,
-    mongoc_client_pool_t *mongodb_client_pool) {
+    mongoc_client_pool_t *mongodb_client_pool,
+    std::string couchdb_url) {
   _memcached_client_pool = memcached_client_pool;
   _mongodb_client_pool = mongodb_client_pool;
+  _couchdb_url = couchdb_url;
 }
 
 void PlotHandler::ReadPlot(
@@ -97,95 +105,48 @@ void PlotHandler::ReadPlot(
     _return = std::string(plot_mmc);
     free(plot_mmc);
   } else {
-    // If not cached in memcached
-    mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-        _mongodb_client_pool);
-    if (!mongodb_client) {
+    const std::string url = _couchdb_url + plot_id_str;
+    std::string response;
+    try {
+      response = couchdb_get(url);
+      LOG(info) << "read plot (plot_id=" << plot_id_str << ") from CouchDB";
+    } catch (const std::exception &e) {
+      LOG(debug) << "failed to read plot (plot_id=" << plot_id_str << ") from CouchDB: " << e.what();
       ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to pop a client from MongoDB pool";
-      free(plot_mmc);
-      throw se;
-    }
-    auto collection = mongoc_client_get_collection(
-        mongodb_client, "plot", "plot");
-    if (!collection) {
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to create collection plot from DB plot";
-      free(plot_mmc);
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+      se.errorCode = ErrorCode::SE_COUCHDB_ERROR;
+      se.message = e.what();
       throw se;
     }
 
-    bson_t *query = bson_new();
-    BSON_APPEND_INT64(query, "plot_id", plot_id);
-
-    auto find_span = opentracing::Tracer::Global()->StartSpan(
-        "MongoFindPlot", { opentracing::ChildOf(&span->context()) });
-    mongoc_cursor_t *cursor = mongoc_collection_find_with_opts(
-        collection, query, nullptr, nullptr);
-    const bson_t *doc;
-    bool found = mongoc_cursor_next(cursor, &doc);
-    find_span->Finish();
-
-    if (found) {
-      bson_iter_t iter;
-      if (bson_iter_init_find(&iter, doc, "plot")) {
-        char *plot_mongo_char = bson_iter_value(&iter)->value.v_utf8.str;
-        size_t plot_mongo_len = bson_iter_value(&iter)->value.v_utf8.len;
-        LOG(debug) << "Find plot " << plot_id << " cache miss";
-        _return = std::string(plot_mongo_char, plot_mongo_char + plot_mongo_len);
-        bson_destroy(query);
-        mongoc_cursor_destroy(cursor);
-        mongoc_collection_destroy(collection);
-        mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-        memcached_client = memcached_pool_pop(
-            _memcached_client_pool, true, &memcached_rc);
-
-        // Upload the plot to memcached
-        auto set_span = opentracing::Tracer::Global()->StartSpan(
-            "MmcSetPlot", { opentracing::ChildOf(&span->context()) });
-        memcached_rc = memcached_set(
-            memcached_client,
-            plot_id_str.c_str(),
-            plot_id_str.length(),
-            _return.c_str(),
-            _return.length(),
-            static_cast<time_t>(0),
-            static_cast<uint32_t>(0)
-        );
-        set_span->Finish();
-
-        if (memcached_rc != MEMCACHED_SUCCESS) {
-          LOG(warning) << "Failed to set plot to Memcached: "
-              << memcached_strerror(memcached_client, memcached_rc);
-        }
-        memcached_pool_push(_memcached_client_pool, memcached_client);
-      } else {
-        LOG(error) << "Attribute plot is not find in MongoDB";
-        bson_destroy(query);
-        mongoc_cursor_destroy(cursor);
-        mongoc_collection_destroy(collection);
-        mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-        ServiceException se;
-        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-        se.message = "Attribute plot is not find in MongoDB";
-        free(plot_mmc);
-        throw se;
-      }
-    } else {
-      LOG(error) << "Plot_id " << plot_id << " is not found in MongoDB";
-      bson_destroy(query);
-      mongoc_cursor_destroy(cursor);
-      mongoc_collection_destroy(collection);
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+    auto j = json::parse(response);
+    if (!j.contains("plot") || !j["plot"].is_string()) {
       ServiceException se;
       se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
-      se.message = "Plot_id " + plot_id_str + " is not found in MongoDB";
-      free(plot_mmc);
+      se.message = "plot field missing in CouchDB doc id=" + plot_id_str;
       throw se;
     }
+    _return = j["plot"].get<std::string>();
+
+
+    // Upload the plot to memcached
+    auto set_span = opentracing::Tracer::Global()->StartSpan(
+        "MmcSetPlot", { opentracing::ChildOf(&span->context()) });
+    memcached_rc = memcached_set(
+        memcached_client,
+        plot_id_str.c_str(),
+        plot_id_str.length(),
+        _return.c_str(),
+        _return.length(),
+        static_cast<time_t>(0),
+        static_cast<uint32_t>(0)
+    );
+    set_span->Finish();
+
+    if (memcached_rc != MEMCACHED_SUCCESS) {
+      LOG(warning) << "Failed to set plot to Memcached: "
+          << memcached_strerror(memcached_client, memcached_rc);
+    }
+    memcached_pool_push(_memcached_client_pool, memcached_client);
   }
   span->Finish();
 }
@@ -207,49 +168,25 @@ void PlotHandler::WritePlot(
 
   LOG(info) << "REQUEST to write plot (plot_id=" << plot_id << ", plot=" << plot.c_str() << ")";
 
-  bson_t *new_doc = bson_new();
-  BSON_APPEND_INT64(new_doc, "plot_id", plot_id);
-  BSON_APPEND_UTF8(new_doc, "plot", plot.c_str());
+  const std::string plot_id_str = std::to_string(plot_id);
+  json doc;
+  doc["_id"] = plot_id_str;
+  doc["plot_id"] = plot_id;
+  doc["plot"] = plot;
 
-  mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-      _mongodb_client_pool);
-  if (!mongodb_client) {
+  const std::string url = _couchdb_url + plot_id_str;
+  try {
+    couchdb_put(url, doc.dump());
+    LOG(info) << "wrote plot (plot_id=" << plot_id_str << ") to CouchDB";
+  } catch (const std::exception &e) {
+    LOG(debug) << "failed to write plot (plot_id=" << plot_id_str << ") to CouchDB: " << e.what();
     ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to pop a client from MongoDB pool";
-    throw se;
-  }
-  auto collection = mongoc_client_get_collection(
-      mongodb_client, "plot", "plot");
-  if (!collection) {
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to create collection plot from DB plot";
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-    throw se;
-  }
-  bson_error_t error;
-  auto insert_span = opentracing::Tracer::Global()->StartSpan(
-      "MongoInsertPlot", { opentracing::ChildOf(&span->context()) });
-  bool plotinsert = mongoc_collection_insert_one (
-      collection, new_doc, nullptr, nullptr, &error);
-  insert_span->Finish();
-  if (!plotinsert) {
-    LOG(error) << "Error: Failed to insert plot to MongoDB  (plot_id=" << plot_id << ", plot=" << plot.c_str() << "): "
-               << error.message;
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = error.message;
-    bson_destroy(new_doc);
-    mongoc_collection_destroy(collection);
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+    se.errorCode = ErrorCode::SE_COUCHDB_ERROR;
+    se.message = e.what();
     throw se;
   }
 
-  bson_destroy(new_doc);
-  mongoc_collection_destroy(collection);
-  mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-
+  LOG(info) << "OK (plot_id=" << plot_id << ", plot=" << plot.c_str() << ")";
   span->Finish();
 }
 

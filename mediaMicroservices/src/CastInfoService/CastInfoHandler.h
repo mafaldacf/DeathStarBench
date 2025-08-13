@@ -9,6 +9,8 @@
 #include <libmemcached/memcached.h>
 #include <libmemcached/util.h>
 #include <bson/bson.h>
+#include <nlohmann/json.hpp>
+#include "../utils_couchdb.h"
 
 #include "../../gen-cpp/CastInfoService.h"
 #include "../ClientPool.h"
@@ -18,11 +20,18 @@
 
 namespace media_service {
 
+  using json = nlohmann::json;
+
 class CastInfoHandler : public CastInfoServiceIf {
  public:
+  
+ enum class BackendType { MongoDB, CouchDB };
+
   CastInfoHandler(
       memcached_pool_st *,
-      mongoc_client_pool_t *);
+      mongoc_client_pool_t *,
+      std::string,
+      BackendType);
   ~CastInfoHandler() override = default;
 
   void WriteCastInfo(int64_t req_id, int64_t cast_info_id,
@@ -36,13 +45,19 @@ class CastInfoHandler : public CastInfoServiceIf {
  private:
   memcached_pool_st *_memcached_client_pool;
   mongoc_client_pool_t *_mongodb_client_pool;
+  std::string _couchdb_url;
+  BackendType _backend;
 };
 
 CastInfoHandler::CastInfoHandler(
     memcached_pool_st *memcached_client_pool,
-    mongoc_client_pool_t *mongodb_client_pool) {
+    mongoc_client_pool_t *mongodb_client_pool,
+    std::string couchdb_url,
+    BackendType backend) {
   _memcached_client_pool = memcached_client_pool;
   _mongodb_client_pool = mongodb_client_pool;
+  _couchdb_url = couchdb_url;
+  _backend = backend;
 }
 void CastInfoHandler::WriteCastInfo(
     int64_t req_id,
@@ -61,51 +76,85 @@ void CastInfoHandler::WriteCastInfo(
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
-  bson_t *new_doc = bson_new();
-  BSON_APPEND_INT64(new_doc, "cast_info_id", cast_info_id);
-  BSON_APPEND_UTF8(new_doc, "name", name.c_str());
-  BSON_APPEND_BOOL(new_doc, "gender", gender);
-  BSON_APPEND_UTF8(new_doc, "intro", intro.c_str());
+  LOG(info) << "REQUEST to write cast info (cast_info_id=" << cast_info_id << ", name=" << name << ", gender=" << gender << ")";
 
-  mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-      _mongodb_client_pool);
-  if (!mongodb_client) {
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to pop a client from MongoDB pool";
-    throw se;
+  if (_backend == BackendType::CouchDB) {
+    // --------------------------------------------------
+    // ----------------- COUCHDB WRITE ------------------
+    // --------------------------------------------------
+    try {
+      json doc;
+      const std::string id = std::to_string(cast_info_id);
+      doc["_id"] = id;
+      doc["cast_info_id"] = cast_info_id;
+      doc["name"] = name;
+      doc["gender"] = gender;
+      doc["intro"] = intro;
+  
+      const std::string url = _couchdb_url + id;
+      couchdb_put(url, doc.dump());
+      LOG(info) << "wrote cast-info (cast_info_id=" << cast_info_id << ") to CouchDB";
+    } catch (const std::exception &e) {
+      LOG(error) << "failed to write cast-info to CouchDB: " << e.what();
+      ServiceException se;
+      se.errorCode = ErrorCode::SE_COUCHDB_ERROR;
+      se.message = e.what();
+      throw se;
+    }
   }
-  auto collection = mongoc_client_get_collection(
-      mongodb_client, "cast-info", "cast-info");
-  if (!collection) {
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to create collection cast-info from DB cast-info";
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-    throw se;
-  }
-
-  bson_error_t error;
-  auto insert_span = opentracing::Tracer::Global()->StartSpan(
-      "MongoInsertCastInfo", { opentracing::ChildOf(&span->context()) });
-  bool plotinsert = mongoc_collection_insert_one (
-      collection, new_doc, nullptr, nullptr, &error);
-  insert_span->Finish();
-  if (!plotinsert) {
-    LOG(error) << "Error: Failed to insert cast-info to MongoDB (cast_info_id=" << cast_info_id << ", name=" << name.c_str() << ", gender=" << gender << ", intro=" << intro.c_str() << "): "
-               << error.message;
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = error.message;
+  else if (_backend == BackendType::MongoDB) {
+    // --------------------------------------------------
+    // ----------------- MONGODB WRITE ------------------
+    // --------------------------------------------------
+  
+    bson_t *new_doc = bson_new();
+    BSON_APPEND_INT64(new_doc, "cast_info_id", cast_info_id);
+    BSON_APPEND_UTF8(new_doc, "name", name.c_str());
+    BSON_APPEND_BOOL(new_doc, "gender", gender);
+    BSON_APPEND_UTF8(new_doc, "intro", intro.c_str());
+  
+    mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
+        _mongodb_client_pool);
+    if (!mongodb_client) {
+      ServiceException se;
+      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
+      se.message = "Failed to pop a client from MongoDB pool";
+      throw se;
+    }
+    auto collection = mongoc_client_get_collection(
+        mongodb_client, "cast-info", "cast-info");
+    if (!collection) {
+      ServiceException se;
+      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
+      se.message = "Failed to create collection cast-info from DB cast-info";
+      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+      throw se;
+    }
+  
+    bson_error_t error;
+    auto insert_span = opentracing::Tracer::Global()->StartSpan(
+        "MongoInsertCastInfo", { opentracing::ChildOf(&span->context()) });
+    bool plotinsert = mongoc_collection_insert_one (
+        collection, new_doc, nullptr, nullptr, &error);
+    insert_span->Finish();
+    if (!plotinsert) {
+      LOG(error) << "Error: Failed to insert cast-info to MongoDB (cast_info_id=" << cast_info_id << ", name=" << name.c_str() << ", gender=" << gender << ", intro=" << intro.c_str() << "): "
+                 << error.message;
+      ServiceException se;
+      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
+      se.message = error.message;
+      bson_destroy(new_doc);
+      mongoc_collection_destroy(collection);
+      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+      throw se;
+    }
+  
     bson_destroy(new_doc);
     mongoc_collection_destroy(collection);
     mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-    throw se;
   }
 
-  bson_destroy(new_doc);
-  mongoc_collection_destroy(collection);
-  mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+  LOG(info) << "OK (cast_info_id=" << cast_info_id << ", name=" << name << ", gender=" << gender << ")";
 
   span->Finish();
 }
@@ -126,7 +175,10 @@ void CastInfoHandler::ReadCastInfo(
       { opentracing::ChildOf(parent_span->get()) });
   opentracing::Tracer::Global()->Inject(span->context(), writer);
 
+  LOG(info) << "REQUEST to write cast info (#cast_info_ids=" << cast_info_ids.size() << ")";
+
   if (cast_info_ids.empty()) {
+    LOG(info) << "OK write cast info (cast_info_ids=[])";
     return;
   }
 
@@ -218,84 +270,118 @@ void CastInfoHandler::ReadCastInfo(
   std::vector<std::future<void>> set_futures;
   std::map<int64_t, std::string> cast_info_json_map;
 
-  // Find the rest in MongoDB
+  // Find the rest in database
   if (!cast_info_ids_not_cached.empty()) {
-    bson_t *query = bson_new();
-    bson_t query_child;
-    bson_t query_cast_info_id_list;
-    const char *key;
-    idx = 0;
-    char buf[16];
-    BSON_APPEND_DOCUMENT_BEGIN(query, "cast_info_id", &query_child);
-    BSON_APPEND_ARRAY_BEGIN(&query_child, "$in", &query_cast_info_id_list);
-    for (auto &item : cast_info_ids_not_cached) {
-      bson_uint32_to_string(idx, &key, buf, sizeof buf);
-      BSON_APPEND_INT64(&query_cast_info_id_list, key, item);
-      idx++;
-    }
-    bson_append_array_end(&query_child, &query_cast_info_id_list);
-    bson_append_document_end(query, &query_child);
+    if (_backend == BackendType::CouchDB) {
+      // --------------------------------------------------
+      // ------------------ COUCHDB READ ------------------
+      // --------------------------------------------------
+      auto find_span = opentracing::Tracer::Global()->StartSpan(
+        "CouchDBFindCastInfo", { opentracing::ChildOf(&span->context()) });
 
-    mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-        _mongodb_client_pool);
-    if (!mongodb_client) {
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to pop a client from MongoDB pool";
-      throw se;
-    }
-    auto collection = mongoc_client_get_collection(
-        mongodb_client, "cast-info", "cast-info");
-    if (!collection) {
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to create collection user from DB user";
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-      throw se;
-    }
+      for (auto id : cast_info_ids_not_cached) {
+        const std::string id_str = std::to_string(id);
+        const std::string url = _couchdb_url + id_str;
+        try {
+          std::string body = couchdb_get(url);
+          json j = json::parse(body);
 
-    mongoc_cursor_t *cursor = mongoc_collection_find_with_opts(
-        collection, query, nullptr, nullptr);
-    const bson_t *doc;
+          CastInfo ci;
+          ci.cast_info_id = j.value("cast_info_id", id);
+          ci.gender = j.value("gender", false);
+          ci.name = j.value("name", std::string());
+          ci.intro = j.value("intro", std::string());
 
-    auto find_span = opentracing::Tracer::Global()->StartSpan(
-        "MongoFindCastInfo", {opentracing::ChildOf(&span->context())});
-
-    while (true) {
-      bool found = mongoc_cursor_next(cursor, &doc);
-      if (!found) {
-        break;
+          cast_info_json_map.emplace(ci.cast_info_id, body);
+          return_map.emplace(ci.cast_info_id, ci);
+        } catch (const std::exception &e) {
+          LOG(warning) << "failed to get cast-info id=" << id << " from CouchDB: " << e.what();
+        }
       }
-      bson_iter_t iter;
-      CastInfo new_cast_info;
-      char *cast_info_json_char = bson_as_json(doc, nullptr);
-      json cast_info_json = json::parse(cast_info_json_char);
-      new_cast_info.cast_info_id = cast_info_json["cast_info_id"];
-      new_cast_info.gender = cast_info_json["gender"];
-      new_cast_info.name = cast_info_json["name"];
-      new_cast_info.intro = cast_info_json["intro"];
-      cast_info_json_map.insert({
-        new_cast_info.cast_info_id, std::string(cast_info_json_char)});
-      return_map.insert({new_cast_info.cast_info_id, new_cast_info});
-      bson_free(cast_info_json_char);
+
+      find_span->Finish();
     }
-    find_span->Finish();
-    bson_error_t error;
-    if (mongoc_cursor_error(cursor, &error)) {
-      LOG(warning) << error.message;
+    else if (_backend == BackendType::MongoDB) {
+      // --------------------------------------------------
+      // ------------------ MONGODB READ ------------------
+      // --------------------------------------------------
+      bson_t *query = bson_new();
+      bson_t query_child;
+      bson_t query_cast_info_id_list;
+      const char *key;
+      idx = 0;
+      char buf[16];
+      BSON_APPEND_DOCUMENT_BEGIN(query, "cast_info_id", &query_child);
+      BSON_APPEND_ARRAY_BEGIN(&query_child, "$in", &query_cast_info_id_list);
+      for (auto &item : cast_info_ids_not_cached) {
+        bson_uint32_to_string(idx, &key, buf, sizeof buf);
+        BSON_APPEND_INT64(&query_cast_info_id_list, key, item);
+        idx++;
+      }
+      bson_append_array_end(&query_child, &query_cast_info_id_list);
+      bson_append_document_end(query, &query_child);
+  
+      mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
+          _mongodb_client_pool);
+      if (!mongodb_client) {
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_MONGODB_ERROR;
+        se.message = "Failed to pop a client from MongoDB pool";
+        throw se;
+      }
+      auto collection = mongoc_client_get_collection(
+          mongodb_client, "cast-info", "cast-info");
+      if (!collection) {
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_MONGODB_ERROR;
+        se.message = "Failed to create collection user from DB user";
+        mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+        throw se;
+      }
+  
+      mongoc_cursor_t *cursor = mongoc_collection_find_with_opts(
+          collection, query, nullptr, nullptr);
+      const bson_t *doc;
+  
+      auto find_span = opentracing::Tracer::Global()->StartSpan(
+          "MongoFindCastInfo", {opentracing::ChildOf(&span->context())});
+  
+      while (true) {
+        bool found = mongoc_cursor_next(cursor, &doc);
+        if (!found) {
+          break;
+        }
+        bson_iter_t iter;
+        CastInfo new_cast_info;
+        char *cast_info_json_char = bson_as_json(doc, nullptr);
+        json cast_info_json = json::parse(cast_info_json_char);
+        new_cast_info.cast_info_id = cast_info_json["cast_info_id"];
+        new_cast_info.gender = cast_info_json["gender"];
+        new_cast_info.name = cast_info_json["name"];
+        new_cast_info.intro = cast_info_json["intro"];
+        cast_info_json_map.insert({
+          new_cast_info.cast_info_id, std::string(cast_info_json_char)});
+        return_map.insert({new_cast_info.cast_info_id, new_cast_info});
+        bson_free(cast_info_json_char);
+      }
+      find_span->Finish();
+      bson_error_t error;
+      if (mongoc_cursor_error(cursor, &error)) {
+        LOG(warning) << error.message;
+        bson_destroy(query);
+        mongoc_cursor_destroy(cursor);
+        mongoc_collection_destroy(collection);
+        mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_MONGODB_ERROR;
+        se.message = error.message;
+        throw se;
+      }
       bson_destroy(query);
       mongoc_cursor_destroy(cursor);
       mongoc_collection_destroy(collection);
       mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = error.message;
-      throw se;
     }
-    bson_destroy(query);
-    mongoc_cursor_destroy(cursor);
-    mongoc_collection_destroy(collection);
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
 
     // Upload cast-info to memcached
     set_futures.emplace_back(std::async(std::launch::async, [&]() {
@@ -349,6 +435,8 @@ void CastInfoHandler::ReadCastInfo(
   } catch (...) {
     LOG(warning) << "Failed to set cast-info to memcached";
   }
+
+  LOG(info) << "OK (#cast_info_ids=" << cast_info_ids.size() << ")";
 }
 
 } // namespace media_service

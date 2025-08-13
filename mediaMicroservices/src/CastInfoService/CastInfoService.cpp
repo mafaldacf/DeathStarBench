@@ -33,6 +33,23 @@ int main(int argc, char *argv[]) {
 
   int port = config_json["cast-info-service"]["port"];
 
+  std::string couchdb_address = std::getenv("COUCHDB_ADDRESS");
+  std::string couchdb_url = "http://admin:admin@" + couchdb_address + "/castinfo/";
+
+  const char* backend_env = std::getenv("CASTINFO_BACKEND");
+  if (!backend_env) {
+      throw std::runtime_error("CASTINFO_BACKEND environment variable not set");
+  }
+  std::string backend_str(backend_env);
+  CastInfoHandler::BackendType backend_type;
+  if (backend_str == "MONGODB") {
+      backend_type = CastInfoHandler::BackendType::MongoDB;
+  } else if (backend_str == "COUCHDB") {
+      backend_type = CastInfoHandler::BackendType::CouchDB;
+  } else {
+      throw std::runtime_error("Invalid MOVIEID_BACKEND value: " + backend_str);
+  }
+
   memcached_pool_st *memcached_client_pool =
       init_memcached_client_pool(config_json, "cast-info",
           MEMCACHED_POOL_MIN_SIZE, MEMCACHED_POOL_MAX_SIZE);
@@ -61,7 +78,9 @@ int main(int argc, char *argv[]) {
   TThreadedServer server(
       std::make_shared<CastInfoServiceProcessor>(
       std::make_shared<CastInfoHandler>(
-              memcached_client_pool, mongodb_client_pool)),
+              memcached_client_pool, mongodb_client_pool,
+              couchdb_url,
+              backend_type)),
       std::make_shared<TServerSocket>("0.0.0.0", port),
       std::make_shared<TFramedTransportFactory>(),
       std::make_shared<TBinaryProtocolFactory>()

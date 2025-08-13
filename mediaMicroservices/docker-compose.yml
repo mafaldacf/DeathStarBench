@@ -8,6 +8,16 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/resolv.conf:/etc/resolv.conf
 
+  couchdb-local:
+    image: couchdb:3
+    hostname: couchdb-local
+    restart: always
+    ports:
+      - "5984:5984"
+    environment:
+      - COUCHDB_USER=admin
+      - COUCHDB_PASSWORD=admin
+
   page-service:
     image: mafaldacf/media-microservices
     hostname: page-service
@@ -30,9 +40,12 @@ services:
     restart: always
     entrypoint: MovieIdService
     environment:
+      #- MOVIEID_BACKEND=DYNAMODB
+      - MOVIEID_BACKEND=COUCHDB
       - AWS_ACCESS_KEY_ID
       - AWS_SECRET_ACCESS_KEY
       - AWS_REGION
+      - COUCHDB_ADDRESS
 
   movie-id-mongodb:
     image: mongo:4.4.6
@@ -115,6 +128,8 @@ services:
 #      - 10007:9090
     restart: always
     entrypoint: ReviewStorageService
+    environment:
+      - COUCHDB_ADDRESS
 
   review-storage-mongodb:
     image: mongo:4.4.6
@@ -195,6 +210,10 @@ services:
 #      - 10010:9090
     restart: always
     entrypoint: CastInfoService
+    environment:
+      #- CASTINFO_BACKEND=MONGODB
+      - CASTINFO_BACKEND=COUCHDB
+      - COUCHDB_ADDRESS
 
   cast-info-mongodb:
     image: mongo:4.4.6
@@ -217,6 +236,8 @@ services:
 #      - 10011:9090
     restart: always
     entrypoint: PlotService
+    environment:
+      - COUCHDB_ADDRESS
 
   plot-mongodb:
     image: mongo:4.4.6

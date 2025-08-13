@@ -43,6 +43,9 @@ int main(int argc, char *argv[]) {
 
   int port = config_json["review-storage-service"]["port"];
 
+  std::string couchdb_address = std::getenv("COUCHDB_ADDRESS");
+  std::string couchdb_url = "http://admin:admin@" + couchdb_address + "/reviewstorage/";
+
   memcached_client_pool =
       init_memcached_client_pool(config_json, "review-storage",
           MEMCACHED_POOL_MIN_SIZE, MEMCACHED_POOL_MAX_SIZE);
@@ -56,7 +59,8 @@ int main(int argc, char *argv[]) {
   TThreadedServer server (
       std::make_shared<ReviewStorageServiceProcessor>(
           std::make_shared<ReviewStorageHandler>(
-              memcached_client_pool, mongodb_client_pool)),
+              memcached_client_pool, mongodb_client_pool,
+              couchdb_url)),
       std::make_shared<TServerSocket>("0.0.0.0", port),
       std::make_shared<TFramedTransportFactory>(),
       std::make_shared<TBinaryProtocolFactory>()

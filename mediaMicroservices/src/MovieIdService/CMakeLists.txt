@@ -14,6 +14,7 @@ find_package(AWSSDK REQUIRED COMPONENTS dynamodb)
 target_include_directories(
     MovieIdService PRIVATE
     ${LIBMEMCACHED_INCLUDE_DIR}
+    ${CURL_INCLUDE_DIRS}
     ${MONGOC_INCLUDE_DIRS}
     ${AWS_SDK_INCLUDE_PATH}
     /usr/local/include/jaegertracing
@@ -23,6 +24,7 @@ target_link_libraries(
     MovieIdService
     ${AWSSDK_LINK_LIBRARIES}
     ${CMAKE_DL_LIBS}
+    ${CURL_LIBRARIES}
     mongoc-1.0
     bson-1.0
     ${LIBMEMCACHED_LIBRARIES}

@@ -9,16 +9,20 @@
 #include <libmemcached/memcached.h>
 #include <libmemcached/util.h>
 #include <bson/bson.h>
+#include <nlohmann/json.hpp>
+#include "../utils_couchdb.h"
 
 #include "../../gen-cpp/ReviewStorageService.h"
 #include "../logger.h"
 #include "../tracing.h"
 
+using json = json;
+
 namespace media_service {
 
 class ReviewStorageHandler : public ReviewStorageServiceIf{
  public:
-  ReviewStorageHandler(memcached_pool_st *, mongoc_client_pool_t *);
+  ReviewStorageHandler(memcached_pool_st *, mongoc_client_pool_t *, std::string);
   ~ReviewStorageHandler() override = default;
   void StoreReview(int64_t, const Review &, 
       const std::map<std::string, std::string> &) override;
@@ -28,13 +32,16 @@ class ReviewStorageHandler : public ReviewStorageServiceIf{
  private:
   memcached_pool_st *_memcached_client_pool;
   mongoc_client_pool_t *_mongodb_client_pool;
+  std::string _couchdb_url;
 };
 
 ReviewStorageHandler::ReviewStorageHandler(
     memcached_pool_st *memcached_pool,
-    mongoc_client_pool_t *mongodb_pool) {
+    mongoc_client_pool_t *mongodb_pool,
+    std::string couchdb_url) {
   _memcached_client_pool = memcached_pool;
   _mongodb_client_pool = mongodb_pool;
+  _couchdb_url = couchdb_url;
 }
 
 void ReviewStorageHandler::StoreReview(
@@ -54,56 +61,34 @@ void ReviewStorageHandler::StoreReview(
 
   LOG(info) << "request to store review (movie_id=" << review.movie_id.c_str() << ", review_id=" << review.review_id << ")";
 
-  mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-      _mongodb_client_pool);
-  if (!mongodb_client) {
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to pop a client from MongoDB pool";
-    throw se;
-  }
 
-  auto collection = mongoc_client_get_collection(
-      mongodb_client, "review", "review");
-  if (!collection) {
-    ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = "Failed to create collection user from DB user";
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-    throw se;
-  }
-
-  bson_t *new_doc = bson_new();
-  BSON_APPEND_INT64(new_doc, "review_id", review.review_id);
-  BSON_APPEND_INT64(new_doc, "timestamp", review.timestamp);
-  BSON_APPEND_INT64(new_doc, "user_id", review.user_id);
-  BSON_APPEND_UTF8(new_doc, "movie_id", review.movie_id.c_str());
-  BSON_APPEND_UTF8(new_doc, "text", review.text.c_str());
-  BSON_APPEND_INT32(new_doc, "rating", review.rating);
-  BSON_APPEND_INT64(new_doc, "req_id", review.req_id);
-  bson_error_t error;
+  json new_doc;
+  const std::string doc_id = std::to_string(review.review_id);
+  new_doc["_id"]      = doc_id;
+  new_doc["review_id"]= review.review_id;
+  new_doc["timestamp"]= review.timestamp;
+  new_doc["user_id"]  = review.user_id;
+  new_doc["movie_id"] = review.movie_id;
+  new_doc["text"]     = review.text;
+  new_doc["rating"]   = review.rating;
+  new_doc["req_id"]   = review.req_id;
+  std::string url = _couchdb_url + doc_id;
 
   auto insert_span = opentracing::Tracer::Global()->StartSpan(
-      "MongoInsertReview", { opentracing::ChildOf(&span->context()) });
-  bool plotinsert = mongoc_collection_insert_one (
-      collection, new_doc, nullptr, nullptr, &error);
-  insert_span->Finish();
+      "CouchDBPutReview", { opentracing::ChildOf(&span->context()) });
 
-  if (!plotinsert) {
-    LOG(error) << "Error: Failed to insert review to MongoDB: "
-        << error.message;
+  try {
+    couchdb_put(url, new_doc.dump());
+    LOG(info) << "wrote review (review_id=" << review.review_id << ", movie_id=" << review.movie_id << ") to couchdb";
+  } catch (const std::exception &e) {
+    LOG(debug) << "failed to insert review to couchdb: " << e.what();
     ServiceException se;
-    se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-    se.message = error.message;
-    bson_destroy(new_doc);
-    mongoc_collection_destroy(collection);
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+    se.errorCode = ErrorCode::SE_COUCHDB_ERROR;
+    se.message = e.what();
+    insert_span->Finish();
     throw se;
   }
-
-  bson_destroy(new_doc);
-  mongoc_collection_destroy(collection);
-  mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
+  insert_span->Finish();
 
   LOG(info) << "OK! (movie_id=" << review.movie_id.c_str() << ", review_id=" << review.review_id << ")";
 
@@ -229,104 +214,86 @@ void ReviewStorageHandler::ReadReviews(
   
   // Find the rest in MongoDB
   if (!review_ids_not_cached.empty()) {
-    mongoc_client_t *mongodb_client = mongoc_client_pool_pop(
-        _mongodb_client_pool);
-    if (!mongodb_client) {
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to pop a client from MongoDB pool";
-      throw se;
+    json body;
+    body["keys"] = json::array();
+    for (const auto &rid : review_ids_not_cached) {
+      body["keys"].push_back(std::to_string(rid));
     }
-    auto collection = mongoc_client_get_collection(
-        mongodb_client, "review", "review");
-    if (!collection) {
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = "Failed to create collection user from DB user";
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-      throw se;
-    }
-    bson_t *query = bson_new();
-    bson_t query_child;
-    bson_t query_review_id_list;
-    const char *key;
-    idx = 0;
-    char buf[16];
-    BSON_APPEND_DOCUMENT_BEGIN(query, "review_id", &query_child);
-    BSON_APPEND_ARRAY_BEGIN(&query_child, "$in", &query_review_id_list);
-    for (auto &item : review_ids_not_cached) {
-      bson_uint32_to_string(idx, &key, buf, sizeof buf);
-      BSON_APPEND_INT64(&query_review_id_list, key, item);
-      idx++;
-    }
-    bson_append_array_end(&query_child, &query_review_id_list);
-    bson_append_document_end(query, &query_child);
-    mongoc_cursor_t *cursor = mongoc_collection_find_with_opts(
-        collection, query, nullptr, nullptr);
-    const bson_t *doc;
+
+    const std::string url = _couchdb_url + "_all_docs?include_docs=true";
+
     auto find_span = opentracing::Tracer::Global()->StartSpan(
-        "MongoFindPosts", {opentracing::ChildOf(&span->context())});
-    while (true) {
-      bool found = mongoc_cursor_next(cursor, &doc);
-      if (!found) {
-        break;
-      }
-      Review new_review;
-      char *review_json_char = bson_as_json(doc, nullptr);
-      json review_json = json::parse(review_json_char);
-      new_review.req_id = review_json["req_id"];
-      new_review.user_id = review_json["user_id"];
-      new_review.movie_id = review_json["movie_id"];
-      new_review.text = review_json["text"];
-      new_review.rating = review_json["rating"];
-      new_review.timestamp = review_json["timestamp"];
-      new_review.review_id = review_json["review_id"];
-      review_json_map.insert({new_review.review_id, std::string(review_json_char)});
-      return_map.insert({new_review.review_id, new_review});
-      bson_free(review_json_char);
+        "CouchBulkGetReviews", { opentracing::ChildOf(&span->context()) });
+
+    std::string resp;
+    try {
+      resp = couchdb_post(url, body.dump());
+    } catch (const std::exception &e) {
+      find_span->Finish();
+      LOG(debug) << "failed to bulk fetch reviews from couchdb: " << e.what();
+      ServiceException se; 
+      se.errorCode = ErrorCode::SE_COUCHDB_ERROR; 
+      se.message = e.what(); 
+      throw se;
     }
     find_span->Finish();
-    bson_error_t error;
-    if (mongoc_cursor_error(cursor, &error)) {
-      LOG(warning) << error.message;
-      bson_destroy(query);
-      mongoc_cursor_destroy(cursor);
-      mongoc_collection_destroy(collection);
-      mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
-      ServiceException se;
-      se.errorCode = ErrorCode::SE_MONGODB_ERROR;
-      se.message = error.message;
-      throw se;
-    }
-    bson_destroy(query);
-    mongoc_cursor_destroy(cursor);
-    mongoc_collection_destroy(collection);
-    mongoc_client_pool_push(_mongodb_client_pool, mongodb_client);
 
-    // upload reviews to memcached
+    json j = json::parse(resp);
+    if (j.contains("rows") && j["rows"].is_array()) {
+      for (auto &row : j["rows"]) {
+        if (!row.contains("doc") || row["doc"].is_null()) continue;
+        auto &d = row["doc"];
+
+        Review new_review;
+        new_review.req_id   = d.value("req_id",   static_cast<int64_t>(0));
+        new_review.user_id  = d.value("user_id",  static_cast<int64_t>(0));
+        new_review.movie_id = d.value("movie_id", std::string{});
+        new_review.text     = d.value("text",     std::string{});
+        new_review.rating   = d.value("rating",   0);
+        new_review.timestamp= d.value("timestamp",static_cast<int64_t>(0));
+
+        if (d.contains("review_id")) {
+          if (d["review_id"].is_number_integer())
+            new_review.review_id = d["review_id"].get<int64_t>();
+          else if (d["review_id"].is_string())
+            new_review.review_id = std::stoll(d["review_id"].get<std::string>());
+        } else if (d.contains("_id") && d["_id"].is_string()) {
+          // fallback to doc _id
+          try { new_review.review_id = std::stoll(d["_id"].get<std::string>()); } catch (...) {}
+        }
+
+        std::string review_json_str = d.dump();
+
+        review_json_map.insert({ new_review.review_id, review_json_str });
+        return_map.insert({ new_review.review_id, new_review });
+      }
+    }
+
     set_futures.emplace_back(std::async(std::launch::async, [&]() {
       memcached_return_t _rc;
-      auto _memcached_client = memcached_pool_pop(
-          _memcached_client_pool, true, &_rc);
+      auto *_memcached_client = memcached_pool_pop(_memcached_client_pool, true, &_rc);
       if (!_memcached_client) {
-        LOG(error) << "Failed to pop a client from memcached pool";
-        ServiceException se;
-        se.errorCode = ErrorCode::SE_MEMCACHED_ERROR;
-        se.message = "Failed to pop a client from memcached pool";
-        throw se;
+        LOG(error) << "failed to pop a client from memcached pool";
+        ServiceException se; se.errorCode = ErrorCode::SE_MEMCACHED_ERROR; se.message = "failed to pop a client from memcached pool"; throw se;
       }
       auto set_span = opentracing::Tracer::Global()->StartSpan(
-          "MmcSetPost", {opentracing::ChildOf(&span->context())});
-      for (auto & it : review_json_map) {
+          "MmcSetReview", { opentracing::ChildOf(&span->context()) });
+
+      for (auto &it : review_json_map) {
         std::string id_str = std::to_string(it.first);
+        const std::string &val = it.second;
         _rc = memcached_set(
             _memcached_client,
             id_str.c_str(),
             id_str.length(),
-            it.second.c_str(),
-            it.second.length(),
+            val.data(),
+            val.size(),
             static_cast<time_t>(0),
             static_cast<uint32_t>(0));
+        if (_rc != MEMCACHED_SUCCESS) {
+          LOG(warning) << "failed to set review " << id_str << " to memcached: "
+                      << memcached_strerror(_memcached_client, _rc);
+        }
       }
       memcached_pool_push(_memcached_client_pool, _memcached_client);
       set_span->Finish();

@@ -53,6 +53,23 @@ int main(int argc, char *argv[]) {
   std::string rating_addr = config_json["rating-service"]["addr"];
   int rating_port = config_json["rating-service"]["port"];
 
+  std::string couchdb_address = std::getenv("COUCHDB_ADDRESS");
+  std::string couchdb_url = "http://admin:admin@" + couchdb_address + "/movieid/";
+
+  const char* backend_env = std::getenv("MOVIEID_BACKEND");
+  if (!backend_env) {
+      throw std::runtime_error("MOVIEID_BACKEND environment variable not set");
+  }
+  std::string backend_str(backend_env);
+  MovieIdHandler::BackendType backend_type;
+  if (backend_str == "DYNAMODB") {
+      backend_type = MovieIdHandler::BackendType::DynamoDB;
+  } else if (backend_str == "COUCHDB") {
+      backend_type = MovieIdHandler::BackendType::CouchDB;
+  } else {
+      throw std::runtime_error("Invalid MOVIEID_BACKEND value: " + backend_str);
+  }
+
   memcached_pool_st *memcached_client_pool =
       init_memcached_client_pool(config_json, "movie-id", 32, 128);
   mongoc_client_pool_t* mongodb_client_pool =
@@ -88,7 +105,9 @@ int main(int argc, char *argv[]) {
       std::make_shared<MovieIdHandler>(
               memcached_client_pool, mongodb_client_pool,
               &compose_client_pool, &rating_client_pool,
-              &dynamo_client, aws_region, dynamo_table_name)),
+              &dynamo_client, aws_region, dynamo_table_name,
+              couchdb_url,
+              backend_type)),
       std::make_shared<TServerSocket>("0.0.0.0", port),
       std::make_shared<TFramedTransportFactory>(),
       std::make_shared<TBinaryProtocolFactory>()

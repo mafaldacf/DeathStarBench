@@ -9,6 +9,7 @@ target_include_directories(
     ReviewStorageService PRIVATE
     ${LIBMEMCACHED_INCLUDE_DIR}
     ${MONGOC_INCLUDE_DIRS}
+    ${CURL_INCLUDE_DIRS}
     /usr/local/include/jaegertracing
 )
 
@@ -16,6 +17,7 @@ target_link_libraries(
     ReviewStorageService
     ${MONGOC_LIBRARIES}
     ${LIBMEMCACHED_LIBRARIES}
+    ${CURL_LIBRARIES}
     nlohmann_json::nlohmann_json
     ${THRIFT_LIB}
     ${CMAKE_THREAD_LIBS_INIT}
