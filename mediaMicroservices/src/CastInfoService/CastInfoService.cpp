@@ -47,7 +47,7 @@ int main(int argc, char *argv[]) {
   } else if (backend_str == "COUCHDB") {
       backend_type = CastInfoHandler::BackendType::CouchDB;
   } else {
-      throw std::runtime_error("Invalid MOVIEID_BACKEND value: " + backend_str);
+      throw std::runtime_error("unknown MOVIEID_BACKEND value: " + backend_str);
   }
 
   memcached_pool_st *memcached_client_pool =

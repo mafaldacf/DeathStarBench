@@ -8,15 +8,35 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/resolv.conf:/etc/resolv.conf
 
-  couchdb-local:
-    image: couchdb:3
-    hostname: couchdb-local
-    restart: always
-    ports:
-      - "5984:5984"
-    environment:
-      - COUCHDB_USER=admin
-      - COUCHDB_PASSWORD=admin
+  #couchdb-local:
+  #  image: couchdb:3
+  #  hostname: couchdb-local
+  #  restart: always
+  #  ports:
+  #    - "10010:5984"
+  #  environment:
+  #    - COUCHDB_USER=admin
+  #    - COUCHDB_PASSWORD=admin
+#
+  #postgresql-local:
+  #  image: postgres:9.4
+  #  hostname: postgresql-local
+  #  restart: always
+  #  ports:
+  #    - "10020:5432"
+  #  environment:
+  #    - POSTGRES_USER=admin
+  #    - POSTGRES_PASSWORD=admin
+  #    - POSTGRES_DB=mediamicroservices
+  #    - POSTGRES_HOST_AUTH_METHOD=md5
+#
+  #scylladb-local:
+  #  image: scylladb/scylla:5.2.0
+  #  hostname: scylladb-local
+  #  restart: always
+  #  ports:
+  #    - "10030:9042"
+
 
   page-service:
     image: mafaldacf/media-microservices
@@ -41,11 +61,13 @@ services:
     entrypoint: MovieIdService
     environment:
       #- MOVIEID_BACKEND=DYNAMODB
-      - MOVIEID_BACKEND=COUCHDB
+      #- MOVIEID_BACKEND=COUCHDB
+      - MOVIEID_BACKEND=POSTGRESQL
       - AWS_ACCESS_KEY_ID
       - AWS_SECRET_ACCESS_KEY
       - AWS_REGION
       - COUCHDB_ADDRESS
+      - POSTGRESQL_ADDRESS
 
   movie-id-mongodb:
     image: mongo:4.4.6

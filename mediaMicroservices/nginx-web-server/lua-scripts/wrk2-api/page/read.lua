@@ -32,25 +32,35 @@ function _M.ReadPage()
   local review_start = tonumber(args.review_start)
   local review_stop = tonumber(args.review_stop)
 
-  local client = GenericObjectPool:connection(PageServiceClient, "page-service" .. k8s_suffix , 9090)
-  local page = client:ReadPage(req_id, movie_id, review_start, review_stop)
+  local client = GenericObjectPool:connection(PageServiceClient, "page-service" .. k8s_suffix, 9090)
+  local ok, res = pcall(client.ReadPage, client, req_id, movie_id, review_start, review_stop)
 
+  if not ok then
+    local msg = (res.message or res.msg or require("cjson").encode(res)) or tostring(res)
+    ngx.status = ngx.HTTP_INTERNAL_SERVER_ERROR
+    ngx.say("ERROR reading page: " .. msg)
+    ngx.log(ngx.ERR, "error reading page: " .. msg)
+    GenericObjectPool:returnConnection(client)
+    return ngx.exit(ngx.status)
+  end
+
+  local page = res
   local cjson = require "cjson.safe"
   cjson.encode_empty_table_as_object(false)
 
-  local mi = page and page.movie_info
-  local reviews = page and (page.reviews or (mi and mi.reviews))
+  local movie_info = page and page.movie_info
+  local reviews = page and (page.reviews or (movie_info and mi.reviews))
 
   ngx.say(string.format("successfully read page (movie_id=%s):", tostring(movie_id)))
 
-  if type(reviews) == "table" and #reviews > 0 then
+  if #reviews > 0 then
     for i, review in ipairs(reviews) do
       ngx.say(string.format("\tReview #%d: text=%s", i, tostring(review.text or "")))
     end
   else
     ngx.say("\t(no reviews)")
   end
-  
+
   GenericObjectPool:returnConnection(client)
 
 end

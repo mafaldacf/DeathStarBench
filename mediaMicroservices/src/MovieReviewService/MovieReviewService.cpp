@@ -34,7 +34,7 @@ int main(int argc, char *argv[]) {
   int port = config_json["movie-review-service"]["port"];
 
   std::string couchdb_address = std::getenv("COUCHDB_ADDRESS");
-  std::string couchdb_url = "http://admin:admin@" + couchdb_address + "/moviereview/";
+  std::string couchdb_url = "http://admin:admin@" + couchdb_address + "/movieinfo/";
   
   std::string redis_addr =
       config_json["movie-review-redis"]["addr"];

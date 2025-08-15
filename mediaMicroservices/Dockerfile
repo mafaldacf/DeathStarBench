@@ -6,23 +6,9 @@ RUN apt-get update && apt-get install -y \
     zlib1g-dev \ 
     libssl-dev \ 
     libpulse-dev \
-    uuid-dev
-
-# Install AWS SDK
-#ARG AWS_SDK_CPP_VERSION=1.8.186
-#RUN git clone --recurse-submodules --branch ${AWS_SDK_CPP_VERSION} https://github.com/aws/aws-sdk-cpp.git
-#RUN cd aws-sdk-cpp && git submodule update --init --recursive
-#RUN cd aws-sdk-cpp && mkdir build && cd build && cmake .. \
-#    -DCMAKE_BUILD_TYPE=Release \
-#    -DBUILD_ONLY="core;dynamodb;s3" \
-#    -DENABLE_TESTING=OFF \
-#    -DENABLE_UNITY_BUILD=ON \
-#    -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
-#    -DBUILD_SHARED_LIBS=OFF \
-#    -DLEGACY_BUILD=ON \
-#    -DENABLE_CRYPTO=ON \
-#    -DENABLE_CRT=ON \
-#    -DBUILD_DEPS=ON
+    uuid-dev \
+    libpqxx-dev \
+    libpq-dev
 
 # Upgrade CMake
 RUN wget https://cmake.org/files/v3.22/cmake-3.22.1.tar.gz

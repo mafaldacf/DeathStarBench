@@ -138,6 +138,125 @@ function UploadMovieId_result:write(oprot)
   oprot:writeStructEnd()
 end
 
+local ReadMovieId_args = __TObject:new{
+  req_id,
+  title,
+  carrier
+}
+
+function ReadMovieId_args:read(iprot)
+  iprot:readStructBegin()
+  while true do
+    local fname, ftype, fid = iprot:readFieldBegin()
+    if ftype == TType.STOP then
+      break
+    elseif fid == 1 then
+      if ftype == TType.I64 then
+        self.req_id = iprot:readI64()
+      else
+        iprot:skip(ftype)
+      end
+    elseif fid == 2 then
+      if ftype == TType.STRING then
+        self.title = iprot:readString()
+      else
+        iprot:skip(ftype)
+      end
+    elseif fid == 3 then
+      if ftype == TType.MAP then
+        self.carrier = {}
+        local _ktype45, _vtype46, _size44 = iprot:readMapBegin()
+        for _i=1,_size44 do
+          local _key48 = iprot:readString()
+          local _val49 = iprot:readString()
+          self.carrier[_key48] = _val49
+        end
+        iprot:readMapEnd()
+      else
+        iprot:skip(ftype)
+      end
+    else
+      iprot:skip(ftype)
+    end
+    iprot:readFieldEnd()
+  end
+  iprot:readStructEnd()
+end
+
+function ReadMovieId_args:write(oprot)
+  oprot:writeStructBegin('ReadMovieId_args')
+  if self.req_id ~= nil then
+    oprot:writeFieldBegin('req_id', TType.I64, 1)
+    oprot:writeI64(self.req_id)
+    oprot:writeFieldEnd()
+  end
+  if self.title ~= nil then
+    oprot:writeFieldBegin('title', TType.STRING, 2)
+    oprot:writeString(self.title)
+    oprot:writeFieldEnd()
+  end
+  if self.carrier ~= nil then
+    oprot:writeFieldBegin('carrier', TType.MAP, 3)
+    oprot:writeMapBegin(TType.STRING, TType.STRING, ttable_size(self.carrier))
+    for kiter50,viter51 in pairs(self.carrier) do
+      oprot:writeString(kiter50)
+      oprot:writeString(viter51)
+    end
+    oprot:writeMapEnd()
+    oprot:writeFieldEnd()
+  end
+  oprot:writeFieldStop()
+  oprot:writeStructEnd()
+end
+
+local ReadMovieId_result = __TObject:new{
+  movie_id,
+  se
+}
+
+function ReadMovieId_result:read(iprot)
+  iprot:readStructBegin()
+  while true do
+    local fname, ftype, fid = iprot:readFieldBegin()
+    if ftype == TType.STOP then
+      break
+    elseif fid == 0 then
+      if ftype == TType.STRING then
+        self.movie_id = iprot:readString()
+      else
+        iprot:skip(ftype)
+      end
+    elseif fid == 1 then
+      if ftype == TType.STRUCT then
+        self.se = ServiceException:new{}
+        self.se:read(iprot)
+      else
+        iprot:skip(ftype)
+      end
+    else
+      iprot:skip(ftype)
+    end
+    iprot:readFieldEnd()
+  end
+  iprot:readStructEnd()
+end
+
+function ReadMovieId_result:write(oprot)
+  oprot:writeStructBegin('ReadMovieId_result')
+  if self.movie_id ~= nil then
+    oprot:writeFieldBegin('movie_id', TType.STRING, 0)
+    oprot:writeString(self.movie_id)
+    oprot:writeFieldEnd()
+  end
+  if self.se ~= nil then
+    oprot:writeFieldBegin('se', TType.STRUCT, 1)
+    self.se:write(oprot)
+    oprot:writeFieldEnd()
+  end
+  oprot:writeFieldStop()
+  oprot:writeStructEnd()
+end
+
 local RegisterMovieId_args = __TObject:new{
   req_id,
   title,
@@ -294,6 +413,41 @@ function MovieIdServiceClient:recv_UploadMovieId(req_id, title, rating, carrier)
   end
 end
 
+function MovieIdServiceClient:ReadMovieId(req_id, title, carrier)
+  self:send_ReadMovieId(req_id, title, carrier)
+  return self:recv_ReadMovieId(req_id, title, carrier)
+end
+
+function MovieIdServiceClient:send_ReadMovieId(req_id, title, carrier)
+  self.oprot:writeMessageBegin('ReadMovieId', TMessageType.CALL, self._seqid)
+  local args = ReadMovieId_args:new{}
+  args.req_id = req_id
+  args.title = title
+  args.carrier = carrier
+  args:write(self.oprot)
+  self.oprot:writeMessageEnd()
+  self.oprot.trans:flush()
+end
+
+function MovieIdServiceClient:recv_ReadMovieId(req_id, title, carrier)
+  local fname, mtype, rseqid = self.iprot:readMessageBegin()
+  if mtype == TMessageType.EXCEPTION then
+    local x = TApplicationException:new{}
+    x:read(self.iprot)
+    self.iprot:readMessageEnd()
+    error(x)
+  end
+  local result = ReadMovieId_result:new{}
+  result:read(self.iprot)
+  self.iprot:readMessageEnd()
+  if result.movie_id ~= nil then
+    return result.movie_id
+  elseif result.se then
+    error(result.se)
+  end
+  error(TApplicationException:new{errorCode = TApplicationException.MISSING_RESULT})
+end
+
 function MovieIdServiceClient:RegisterMovieId(req_id, title, movie_id, carrier)
   self:send_RegisterMovieId(req_id, title, movie_id, carrier)
   self:recv_RegisterMovieId(req_id, title, movie_id, carrier)
@@ -370,6 +524,27 @@ function MovieIdServiceProcessor:process_UploadMovieId(seqid, iprot, oprot, serv
     result.success = res
   end
   oprot:writeMessageBegin('UploadMovieId', reply_type, seqid)
+  result:write(oprot)
+  oprot:writeMessageEnd()
+  oprot.trans:flush()
+end
+
+function MovieIdServiceProcessor:process_ReadMovieId(seqid, iprot, oprot, server_ctx)
+  local args = ReadMovieId_args:new{}
+  local reply_type = TMessageType.REPLY
+  args:read(iprot)
+  iprot:readMessageEnd()
+  local result = ReadMovieId_result:new{}
+  local status, res = pcall(self.handler.ReadMovieIdd, self.handler, args.req_id, args.title, args.carrier)
+  if not status then
+    reply_type = TMessageType.EXCEPTION
+    result = TApplicationException:new{message = res}
+  elseif ttype(res) == 'ServiceException' then
+    result.se = res
+  else
+    result.success = res
+  end
+  oprot:writeMessageBegin('ReadMovieId', reply_type, seqid)
   result:write(oprot)
   oprot:writeMessageEnd()
   oprot.trans:flush()

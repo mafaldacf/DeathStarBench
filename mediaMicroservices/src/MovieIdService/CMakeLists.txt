@@ -17,6 +17,7 @@ target_include_directories(
     ${CURL_INCLUDE_DIRS}
     ${MONGOC_INCLUDE_DIRS}
     ${AWS_SDK_INCLUDE_PATH}
+    ${PQXX_INCLUDE_DIRS}
     /usr/local/include/jaegertracing
 )
 
@@ -25,6 +26,7 @@ target_link_libraries(
     ${AWSSDK_LINK_LIBRARIES}
     ${CMAKE_DL_LIBS}
     ${CURL_LIBRARIES}
+    ${PQXX_LIBRARIES}
     mongoc-1.0
     bson-1.0
     ${LIBMEMCACHED_LIBRARIES}

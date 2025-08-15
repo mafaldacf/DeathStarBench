@@ -91,6 +91,12 @@ service MovieIdService {
       3: string movie_id,
       4: map<string, string> carrier
   ) throws (1: ServiceException se)
+  
+  string ReadMovieId(
+      1: i64 req_id,
+      2: string title,
+      3: map<string, string> carrier
+  ) throws (1: ServiceException se)
 }
 
 service TextService {

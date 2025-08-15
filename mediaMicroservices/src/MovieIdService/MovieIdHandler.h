@@ -17,6 +17,8 @@
 #include <aws/dynamodb/model/PutItemRequest.h>
 #include <aws/dynamodb/model/GetItemRequest.h>
 
+#include <pqxx/pqxx>
+
 #include "../../gen-cpp/MovieIdService.h"
 #include "../../gen-cpp/ComposeReviewService.h"
 #include "../../gen-cpp/RatingService.h"
@@ -32,7 +34,7 @@ using json = nlohmann::json;
 
 class MovieIdHandler : public MovieIdServiceIf {
  public:
-   enum class BackendType { CouchDB, DynamoDB };
+   enum class BackendType { CouchDB, DynamoDB, PostgreSQL };
 
   MovieIdHandler(
       memcached_pool_st *,
@@ -43,9 +45,12 @@ class MovieIdHandler : public MovieIdServiceIf {
       std::string,
       std::string,
       std::string,
+      std::string,
       BackendType);
   ~MovieIdHandler() override = default;
   void UploadMovieId(int64_t, const std::string &, int32_t,
+                     const std::map<std::string, std::string> &) override;
+  void ReadMovieId(std::string &, int64_t, const std::string &,
                      const std::map<std::string, std::string> &) override;
   void RegisterMovieId(int64_t, const std::string &, const std::string &,
                        const std::map<std::string, std::string> &) override;
@@ -59,6 +64,7 @@ class MovieIdHandler : public MovieIdServiceIf {
   std::string _aws_region;
   std::string _dynamo_table_name;
   std::string _couchdb_url;
+  std::string _postgres_url;
   BackendType _backend;
 };
 
@@ -71,6 +77,7 @@ MovieIdHandler::MovieIdHandler(
     std::string aws_region,
     std::string dynamo_table_name,
     std::string couchdb_url,
+    std::string postgres_url,
     BackendType backend) {
   _memcached_client_pool = memcached_client_pool;
   _mongodb_client_pool = mongodb_client_pool;
@@ -80,6 +87,7 @@ MovieIdHandler::MovieIdHandler(
   _aws_region = aws_region;
   _dynamo_table_name = dynamo_table_name;
   _couchdb_url = couchdb_url;
+  _postgres_url = postgres_url;
   _backend = backend;
 }
 
@@ -149,7 +157,7 @@ void MovieIdHandler::UploadMovieId(
   else {
     if (_backend == BackendType::CouchDB) {
       // --------------------------------------------------
-      // ----------------- COUCHDB WRITE ------------------
+      // ----------------- READ @ COUCHDB -----------------
       // --------------------------------------------------
       auto get_span = opentracing::Tracer::Global()->StartSpan(
           "CouchDBGetMovieId", { opentracing::ChildOf(&span->context()) });
@@ -161,7 +169,7 @@ void MovieIdHandler::UploadMovieId(
         resp = couchdb_get(url);
         LOG(debug) << "found mapping for title=" << title << " in CouchDB";
       } catch (const std::exception &e) {
-        LOG(error) << "movie " << title << " not found in CouchDB: " << e.what();
+        LOG(debug) << "movie " << title << " not found in CouchDB: " << e.what();
         ServiceException se;
         se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
         se.message = "Movie " + title + " not found in CouchDB";
@@ -181,10 +189,9 @@ void MovieIdHandler::UploadMovieId(
       movie_id_str = j["movie_id"].get<std::string>();
       LOG(debug) << "found movie " << movie_id_str << " cache miss (CouchDB)";
     }
-
     else if (_backend == BackendType::DynamoDB) {
       // --------------------------------------------------
-      // ---------------- DYNAMODB WRITE ------------------
+      // ----------------- READ @ DYNAMODB ----------------
       // --------------------------------------------------
       auto get_span = opentracing::Tracer::Global()->StartSpan(
           "DynamoGetMovieId", { opentracing::ChildOf(&span->context()) });
@@ -234,10 +241,42 @@ void MovieIdHandler::UploadMovieId(
 
       movie_id_str = it->second.GetS();
       LOG(debug) << "found movie " << movie_id_str << " cache miss (dynamodb)";
-      // --------------------------------------------------
-      // --------------------------------------------------
     }
+    else if (_backend == BackendType::PostgreSQL) {
+      // --------------------------------------------------
+      // ---------------- READ @ POSTGRESQL ---------------
+      // --------------------------------------------------
+      auto get_span = opentracing::Tracer::Global()->StartSpan(
+          "PostgreSQLGetMovieId", { opentracing::ChildOf(&span->context()) });
 
+      try {
+        pqxx::connection conn(_postgres_url);
+        pqxx::work txn(conn);
+
+        conn.prepare("stmt", "SELECT movie_id FROM movieid WHERE title = $1");
+        pqxx::result res = txn.prepared("stmt")(title).exec();
+        
+        if (res.empty()) {
+          LOG(error) << "movie " << title << " not found in postgresql";
+          ServiceException se;
+          se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+          se.message = "Movie " + title + " not found in PostgreSQL";
+          throw se;
+        }
+        movie_id_str = res[0][0].as<std::string>();
+        txn.commit();
+        LOG(debug) << "found movie " << movie_id_str << " cache miss (postgresql)";
+      } catch (const std::exception& e) {
+        LOG(debug) << "postgresql read error: " << e.what();
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = e.what();
+        throw se;
+      }
+      get_span->Finish();
+    }
+    // --------------------------------------------------
+    // --------------------------------------------------
   }
   
   std::future<void> set_future;
@@ -316,6 +355,230 @@ void MovieIdHandler::UploadMovieId(
   span->Finish();
 }
 
+void MovieIdHandler::ReadMovieId(
+    std::string &_return,
+    int64_t req_id,
+    const std::string &title,
+    const std::map<std::string, std::string> & carrier) {
+
+  // Initialize a span
+  TextMapReader reader(carrier);
+  std::map<std::string, std::string> writer_text_map;
+  TextMapWriter writer(writer_text_map);
+  auto parent_span = opentracing::Tracer::Global()->Extract(reader);
+  auto span = opentracing::Tracer::Global()->StartSpan(
+      "UploadMovieId",
+      { opentracing::ChildOf(parent_span->get()) });
+  opentracing::Tracer::Global()->Inject(span->context(), writer);
+
+  LOG(info) << "REQUEST to upload movie id (title=" << title << ")";
+
+
+  memcached_return_t memcached_rc;
+  memcached_st *memcached_client = memcached_pool_pop(
+      _memcached_client_pool, true, &memcached_rc);
+  if (!memcached_client) {
+    ServiceException se;
+    se.errorCode = ErrorCode::SE_MEMCACHED_ERROR;
+    se.message = "Failed to pop a client from memcached pool";
+    throw se;
+  }
+
+  size_t movie_id_size;
+  uint32_t memcached_flags;
+  // Look for the movie id from memcached
+
+  auto get_span = opentracing::Tracer::Global()->StartSpan(
+      "MmcGetMovieId", { opentracing::ChildOf(&span->context()) });
+
+  char* movie_id_mmc = memcached_get(
+      memcached_client,
+      title.c_str(),
+      title.length(),
+      &movie_id_size,
+      &memcached_flags,
+      &memcached_rc);
+  if (!movie_id_mmc && memcached_rc != MEMCACHED_NOTFOUND) {
+    ServiceException se;
+    se.errorCode = ErrorCode::SE_MEMCACHED_ERROR;
+    se.message = memcached_strerror(memcached_client, memcached_rc);
+    memcached_pool_push(_memcached_client_pool, memcached_client);
+    throw se;
+  }
+  get_span->Finish();
+  memcached_pool_push(_memcached_client_pool, memcached_client);
+  std::string movie_id_str;
+
+  // If cached in memcached
+  if (movie_id_mmc) {
+    LOG(debug) << "Get movie_id " << movie_id_mmc
+        << " cache hit from Memcached";
+    movie_id_str = std::string(movie_id_mmc);
+    free(movie_id_mmc);
+  }
+
+  // if not cached in memcached
+  else {
+    if (_backend == BackendType::CouchDB) {
+      // --------------------------------------------------
+      // ----------------- READ @ COUCHDB -----------------
+      // --------------------------------------------------
+      auto get_span = opentracing::Tracer::Global()->StartSpan(
+          "CouchDBGetMovieId", { opentracing::ChildOf(&span->context()) });
+  
+      const std::string url = _couchdb_url + title;
+      std::string resp;
+  
+      try {
+        resp = couchdb_get(url);
+        LOG(debug) << "found mapping for title=" << title << " in CouchDB";
+      } catch (const std::exception &e) {
+        LOG(debug) << "movie " << title << " not found in CouchDB: " << e.what();
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Movie " + title + " not found in CouchDB";
+        throw se;
+      }
+  
+      auto j = json::parse(resp);
+      if (!j.contains("movie_id") || !j["movie_id"].is_string()) {
+        LOG(error) << "attribute movie_id is missing in CouchDB doc for title=" << title;
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Attribute movie_id missing in CouchDB doc";
+        throw se;
+      }
+      get_span->Finish();
+  
+      movie_id_str = j["movie_id"].get<std::string>();
+      LOG(debug) << "found movie " << movie_id_str << " cache miss (CouchDB)";
+    }
+    else if (_backend == BackendType::DynamoDB) {
+      // --------------------------------------------------
+      // ----------------- READ @ DYNAMODB ----------------
+      // --------------------------------------------------
+      auto get_span = opentracing::Tracer::Global()->StartSpan(
+          "DynamoGetMovieId", { opentracing::ChildOf(&span->context()) });
+  
+      Aws::DynamoDB::Model::GetItemRequest get_req;
+      get_req.SetTableName(_dynamo_table_name);
+  
+      Aws::Map<Aws::String, Aws::DynamoDB::Model::AttributeValue> key;
+      Aws::DynamoDB::Model::AttributeValue title_key;
+      title_key.SetS(title);
+      key.emplace("title", std::move(title_key));
+      get_req.SetKey(std::move(key));
+  
+      auto response = _dynamo_client->GetItem(get_req);
+      get_span->Finish();
+  
+      if (!response.IsSuccess()) {
+        const auto& err = response.GetError();
+        LOG(error) << "failed to get item from dynamo (region=" << _aws_region << ", table= " << _dynamo_table_name << "): " << err.GetMessage();
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = err.GetMessage();
+        free(movie_id_mmc);
+        throw se;
+      }
+  
+      const auto& item = response.GetResult().GetItem();
+      if (item.empty()) {
+        // title not found
+        LOG(error) << "movie " << title << " not found in dynamodb";
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Movie " + title + " not found in DynamoDB";
+        free(movie_id_mmc);
+        throw se;
+      }
+
+      auto it = item.find("movie_id");
+      if (it == item.end()) {
+        LOG(error) << "attribute movie_id does not exist in item";
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Attribute movie_id does not exist in item";
+        free(movie_id_mmc);
+        throw se;
+      }
+
+      movie_id_str = it->second.GetS();
+      LOG(debug) << "found movie " << movie_id_str << " cache miss (dynamodb)";
+    }
+    else if (_backend == BackendType::PostgreSQL) {
+      // --------------------------------------------------
+      // ---------------- READ @ POSTGRESQL ---------------
+      // --------------------------------------------------
+      auto get_span = opentracing::Tracer::Global()->StartSpan(
+          "PostgreSQLGetMovieId", { opentracing::ChildOf(&span->context()) });
+
+      try {
+        pqxx::connection conn(_postgres_url);
+        pqxx::work txn(conn);
+
+        conn.prepare("stmt", "SELECT movie_id FROM movieid WHERE title = $1");
+        pqxx::result res = txn.prepared("stmt")(title).exec();
+
+        if (res.empty()) {
+          LOG(error) << "movie " << title << " not found in postgresql";
+          ServiceException se;
+          se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+          se.message = "Movie " + title + " not found in PostgreSQL";
+          throw se;
+        }
+        movie_id_str = res[0][0].as<std::string>();
+        txn.commit();
+        LOG(debug) << "found movie " << movie_id_str << " cache miss (postgresql)";
+      } catch (const std::exception& e) {
+        LOG(error) << "postgresql read error: " << e.what();
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = e.what();
+        throw se;
+      }
+      get_span->Finish();
+    }
+    // --------------------------------------------------
+    // --------------------------------------------------
+  }
+  
+  std::future<void> set_future;
+  set_future = std::async(std::launch::async, [&]() {
+    memcached_client = memcached_pool_pop(
+        _memcached_client_pool, true, &memcached_rc);
+    auto set_span = opentracing::Tracer::Global()->StartSpan(
+        "MmcSetMovieId", { opentracing::ChildOf(&span->context()) });
+    // Upload the movie id to memcached
+    memcached_rc = memcached_set(
+        memcached_client,
+        title.c_str(),
+        title.length(),
+        movie_id_str.c_str(),
+        movie_id_str.length(),
+        static_cast<time_t>(0),
+        static_cast<uint32_t>(0)
+    );
+    set_span->Finish();
+    if (memcached_rc != MEMCACHED_SUCCESS) {
+      LOG(warning) << "Failed to set movie_id to Memcached: "
+                   << memcached_strerror(memcached_client, memcached_rc);
+    }
+    memcached_pool_push(_memcached_client_pool, memcached_client);    
+  });
+
+  try {
+    set_future.get();
+  } catch (...) {
+    throw;
+  }
+
+  _return = movie_id_str;
+
+  LOG(info) << "OK (title=" << title << ")";
+  span->Finish();
+}
+
 void MovieIdHandler::RegisterMovieId (
     const int64_t req_id,
     const std::string &title,
@@ -342,12 +605,12 @@ void MovieIdHandler::RegisterMovieId (
 
   if (_backend == BackendType::CouchDB) {
     // --------------------------------------------------
-    // ----------------- COUCHDB WRITE ------------------
+    // ---------------- WRITE @ COUCHDB -----------------
     // --------------------------------------------------
+    LOG(info) << "(couchdb)";
     try {
       couchdb_put_if_absent(url, doc.dump());
-      LOG(info) << "registered movie mapping in CouchDB (title=" << title
-                << ", movie_id=" << movie_id << ")";
+      LOG(info) << "registered movie mapping in CouchDB (title=" << title << ", movie_id=" << movie_id << ")";
     } catch (const std::exception &e) {
       ServiceException se;
       se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
@@ -356,8 +619,9 @@ void MovieIdHandler::RegisterMovieId (
     }
   }
   else if (_backend == BackendType::DynamoDB) {
+    LOG(info) << "(dynamodb)";
     // --------------------------------------------------
-    // ---------------- DYNAMODB WRITE ------------------
+    // --------------- WRITE @ DYNAMODB -----------------
     // --------------------------------------------------
     Aws::DynamoDB::Model::PutItemRequest req;
     req.SetTableName(_dynamo_table_name);
@@ -391,7 +655,40 @@ void MovieIdHandler::RegisterMovieId (
       }
       throw se;
     }
+  } else if (_backend == BackendType::PostgreSQL) {
+    // --------------------------------------------------
+    // -------------- WRITE @ POSTGRESQL ----------------
+    // --------------------------------------------------
+    try {
+      LOG(info) << "(postgresql)";
+      pqxx::connection conn(_postgres_url);
+      pqxx::work txn(conn);
+
+      conn.prepare("stmt", "INSERT INTO movieid(title, movie_id) VALUES($1, $2)");
+      pqxx::result r = txn.prepared("stmt")(title)(movie_id).exec();
+
+      LOG(info) << "going to commit";
+      txn.commit();
+      LOG(info) << "committed";
+
+      if (r.affected_rows() == 0) {
+        ServiceException se;
+        se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+        se.message = "Movie " + title + " already exists in PostgreSQL";
+        throw se;
+      }
+
+      LOG(info) << "registered movie mapping in postgresql (title=" << title << ", movie_id=" << movie_id << ")";
+    } catch (const std::exception& e) {
+      LOG(debug) << "error writing: " << e.what();
+      ServiceException se;
+      se.errorCode = ErrorCode::SE_THRIFT_HANDLER_ERROR;
+      se.message = std::string("Failed to register movie mapping in PostgreSQL: ") + e.what();
+      throw se;
+    }
   }
+  // --------------------------------------------------
+  // --------------------------------------------------
   
   LOG(info) << "OK (title=" << title << ", movie_id=" << movie_id << ")";
   span->Finish();
